@@ -11,8 +11,8 @@ import argparse
 import grpc
 import json
 import logging
-from .generated import gateway_pb2_grpc as pb2_grpc
-from .generated import gateway_pb2 as pb2
+from .proto import gateway_pb2_grpc as pb2_grpc
+from .proto import gateway_pb2 as pb2
 from .config import GatewayConfig
 
 
