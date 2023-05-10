@@ -1,0 +1,62 @@
+name: Run pytest
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  pytest:
+    strategy:
+      matrix:
+        test: ["cli", "state", "multi-gateway"]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          # git submodule update --init --recursive
+          submodules: recursive
+
+      - name: Build images
+        run: |
+          make build
+
+      - name: Setup huge pages
+        run: |
+          make setup
+
+      - name: Start ceph-cluster
+        run: |
+          docker-compose up --detach ceph-cluster
+
+      - name: Wait for the ceph-cluster container to become healthy
+        run: |
+          while true; do
+            container_status=$(docker inspect --format='{{.State.Health.Status}}' ceph-cluster)
+            if [[ $container_status == "healthy" ]]; then
+            break
+          else
+            # Wait for a specific time before checking again
+            sleep 1
+          fi
+          done
+
+      - name: Create RBD image
+        run: |
+          echo "💁 ceph list pools:"
+          docker exec ceph-cluster ceph osd lspools
+          echo "💁 rbd create:"
+          docker exec ceph-cluster rbd create rbd/mytestdevimage --size 16
+          echo "💁 ls rbd:"
+          docker exec ceph-cluster rbd ls rbd
+
+      - name: Run ${{ matrix.test }} test
+        run: |
+          docker-compose run ceph-nvmeof-pytest-${{ matrix.test }} || (docker-compose logs; exit 1)
+
+      - name: Display Logs
+        run: |
+          docker-compose logs
+
+      - name: Compose Down
+        run: make down
+
+      - name: Compose Stop
+        run: make stop

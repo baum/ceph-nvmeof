@@ -1,0 +1,67 @@
+name: Build container Test
+on: [push, pull_request, workflow_dispatch]
+env:
+  # Control gRPC port
+  PORT: 5500
+
+jobs:
+  build-container-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          # git submodule update --init --recursive
+          submodules: recursive
+
+      - name: Build container images
+        run: make build
+
+      - name: Setup huge pages
+        run: make setup
+
+      - name: Compose Up
+        run: |
+          make up || (make logs; exit 1)
+
+      - name: Wait for controller to start
+        run: |
+          until nc -z localhost $PORT; do
+            echo -n .
+            sleep 1
+          done
+          echo
+
+      - name: List containers
+        run: |
+          docker-compose ps
+
+      - name: Create RBD image
+        run: |
+          echo "💁 ceph list pools:"
+          docker exec ceph-cluster ceph osd lspools
+          echo "💁 rbd create:"
+          docker exec ceph-cluster rbd create rbd/mytestdevimage --size 16
+          echo "💁 ls rbd:"
+          docker exec ceph-cluster rbd ls rbd
+
+      - name: Run CLI
+        run: |
+          docker-compose run ceph-nvmeof-cli
+          docker-compose run ceph-nvmeof-cli create_bdev -i mytestdevimage -p rbd -b Ceph0
+          docker-compose run ceph-nvmeof-cli create_subsystem -n nqn.2016-06.io.spdk:cnode1 -s SPDK00000000000001
+          docker-compose run ceph-nvmeof-cli add_namespace -n nqn.2016-06.io.spdk:cnode1 -b Ceph0
+          docker-compose run ceph-nvmeof-cli add_host -n nqn.2016-06.io.spdk:cnode1 -t '*'
+          docker-compose run ceph-nvmeof-cli create_listener -n nqn.2016-06.io.spdk:cnode1 -s 5001
+          # should fail https://github.com/ceph/ceph-nvmeof/issues/137
+          if docker-compose run ceph-nvmeof-cli create_bdev -i mytestdevimage -p rbd -b Ceph0; then exit 1; fi
+          if docker-compose run ceph-nvmeof-cli create_bdev -i wrongimage -p rbd -b Ceph0; then exit 1; fi
+      - name: Display Logs
+        run: |
+          docker-compose logs
+
+      - name: Compose Down
+        run: make down
+
+      - name: Compose Stop
+        run: make stop

@@ -42,7 +42,6 @@ services:
     build:
       context: .
       target: ceph-nvmeof
-    hostname: ceph-nvmeof
     volumes:
       # sudo bash -c 'echo 1024 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages'
       # https://spdk.io/doc/containers.html
@@ -52,14 +51,41 @@ services:
     cap_add:
       - SYS_ADMIN
       - CAP_SYS_NICE
-    ports:
-      - 5500
   ceph-nvmeof:
     extends:
       service: ceph-nvmeof-base
     depends_on:
       ceph-cluster:
         condition: service_healthy
+    ports:
+      # Gateway RPC see addr/port in ceph-nvmeof.conf
+      - 0.0.0.0:5500:5500
+
+  ceph-nvmeof-pytest-base:
+    # Run tests code in current dir
+    extends:
+      service: ceph-nvmeof-base
+    volumes:
+      - ./tests:/src/tests
+
+  ceph-nvmeof-pytest-cli:
+    extends:
+      service: ceph-nvmeof-pytest-base
+    entrypoint: |
+      python3 -m pytest tests/test_cli.py
+
+  ceph-nvmeof-pytest-multi-gateway:
+    extends:
+      service: ceph-nvmeof-pytest-base
+    entrypoint: |
+      python3 -m pytest tests/test_multi_gateway.py
+
+  ceph-nvmeof-pytest-state:
+    extends:
+      service: ceph-nvmeof-pytest-base
+    entrypoint: |
+      python3 -m pytest tests/test_state.py
+
   ceph-nvmeof-devel:
     # Runs from source code in current dir
     extends:
