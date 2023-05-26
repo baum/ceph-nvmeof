@@ -26,9 +26,11 @@ services:
       VSTART_ARGS: >-
         --without-dashboard
         --memstore
+        --cephadm
       TOUCHFILE: /tmp/ceph-cluster.touch
     entrypoint: |
-      sh -c './vstart.sh --new $$VSTART_ARGS &&
+      sh -c 'ssh-keygen -t rsa -f /var/lib/ceph/.ssh/id_rsa -q -N "" &&
+      ./vstart.sh --new $$VSTART_ARGS &&
       ceph osd pool create rbd &&
       sleep infinity'
     healthcheck:

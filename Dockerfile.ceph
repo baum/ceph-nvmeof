@@ -25,7 +25,8 @@ RUN chown ceph:ceph $CEPH_CONF_PATH
 
 RUN ln -sf $EC_PATH/* $CEPH_LIB && \
     ln -sf $OBJCLASS_PATH/* $CEPH_LIB && \
-    ln -sf $CEPH_LIB/compressor/* $CEPH_LIB
+    ln -sf $CEPH_LIB/compressor/* $CEPH_LIB && \
+    ln -sf /usr/sbin/cephadm $CEPH_BIN
 
 USER ceph
 WORKDIR /ceph
