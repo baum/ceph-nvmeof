@@ -30,7 +30,7 @@ services:
       TOUCHFILE: /tmp/ceph-cluster.touch
     entrypoint: |
       sh -c 'ssh-keygen -t rsa -f /var/lib/ceph/.ssh/id_rsa -q -N "" &&
-      ./vstart.sh --new $$VSTART_ARGS &&
+      (./vstart.sh --new $$VSTART_ARGS || (for f in /ceph/out/*mgr*.log; do echo $f; cat $f; done)) &&
       ceph osd pool create rbd &&
       sleep infinity'
     healthcheck:
