@@ -1,6 +1,6 @@
 # syntax = docker/dockerfile:1.4
 
-ARG RELEASE=latest
+ARG RELEASE=v7.0.3-stable-7.0-quincy-centos-stream8
 FROM quay.io/ceph/daemon:$RELEASE
 ENV MON=1 \
     MGR=1 \
@@ -26,11 +26,14 @@ RUN chown ceph:ceph $CEPH_CONF_PATH
 RUN ln -sf $EC_PATH/* $CEPH_LIB && \
     ln -sf $OBJCLASS_PATH/* $CEPH_LIB && \
     ln -sf $CEPH_LIB/compressor/* $CEPH_LIB && \
-    ln -sf /usr/sbin/cephadm $CEPH_BIN
+    ln -sf /usr/sbin/cephadm $CEPH_BIN && \
+    mkdir -p /src/cephadm && \
+    ln -sf /usr/sbin/cephadm /src/cephadm/cephadm
 
 USER ceph
 WORKDIR /ceph
-ADD --chown=ceph:ceph --chmod=755 https://raw.githubusercontent.com/ceph/ceph/main/src/vstart.sh .
+ADD --chown=ceph:ceph --chmod=755 https://github.com/ceph/ceph/raw/quincy/src/vstart.sh .
+#ADD --chown=ceph:ceph --chmod=755 https://raw.githubusercontent.com/ceph/ceph/main/src/vstart.sh .
 
 ENTRYPOINT \
     ./vstart.sh --new $VSTART_ARGS && \
