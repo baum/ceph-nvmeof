@@ -1,7 +1,6 @@
 # syntax = docker/dockerfile:1.4
 ARG CEPH_SPDK_BASE="ubi"
 FROM quay.io/centos/centos:stream9 AS build
-
 ARG CEPH_VERSION
 RUN [ ! -z "${CEPH_VERSION}" ]
 
@@ -49,8 +48,8 @@ RUN DEPS="no" rpmbuild/rpm.sh $CONFIGURE_ARGS
 
 #------------------------------------------------------------------------------
 FROM registry.access.redhat.com/ubi9/ubi AS ceph-spdk-ubi
+ARG CENTOS_BASE="https://mirror.stream.centos.org/9-stream/BaseOS"
 
-ARG CENTOS_BASE="https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/"
 # This would become obsolete as the release rolls out new packages
 ARG CENTOS_REPO_VER="9.0-21.el9"
 
@@ -60,14 +59,13 @@ RUN \
     --mount=type=bind,from=build,source=/root/rpmbuild/rpm,target=/rpm \
     --mount=type=cache,target=/var/cache/dnf \
     --mount=type=cache,target=/var/lib/dnf \
-    rpm -vih $CENTOS_BASE/centos-stream-repos-$CENTOS_REPO_VER.noarch.rpm \
-             $CENTOS_BASE/centos-gpg-keys-$CENTOS_REPO_VER.noarch.rpm \
+    rpm -vih $CENTOS_BASE/$(uname -m)/os/Packages/centos-stream-repos-$CENTOS_REPO_VER.noarch.rpm \
+             $CENTOS_BASE/$(uname -m)/os/Packages/centos-gpg-keys-$CENTOS_REPO_VER.noarch.rpm \
     && dnf install -y /rpm/$(uname -m)/*.rpm
 
 #------------------------------------------------------------------------------
 FROM registry.access.redhat.com/ubi9/ubi-minimal AS ceph-spdk-minimal
 
-ARG CENTOS_BASE="https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/"
 # This would become obsolete as the release rolls out new packages
 ARG CENTOS_REPO_VER="9.0-21.el9"
 
@@ -75,8 +73,8 @@ COPY --from=build /etc/yum.repos.d/ceph.repo /etc/yum.repos.d/ceph.repo
 
 RUN \
     --mount=type=bind,from=build,source=/root/rpmbuild/rpm,target=/rpm \
-    rpm -vih $CENTOS_BASE/centos-stream-repos-$CENTOS_REPO_VER.noarch.rpm \
-             $CENTOS_BASE/centos-gpg-keys-$CENTOS_REPO_VER.noarch.rpm \
+    rpm -vih $CENTOS_BASE/$(uname -m)/os/Packages/centos-stream-repos-$CENTOS_REPO_VER.noarch.rpm \
+             $CENTOS_BASE/$(uname -m)/os/Packages/centos-gpg-keys-$CENTOS_REPO_VER.noarch.rpm \
     && microdnf install -y 'python(abi) = 3.9' librbd1 \
     && rpm -vih /rpm/$(uname -m)/*.rpm \
     && microdnf clean all
