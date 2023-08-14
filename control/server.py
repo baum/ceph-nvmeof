@@ -7,19 +7,20 @@
 #  Authors: anita.shekar@ibm.com, sandy.kaur@ibm.com
 #
 
-import ctypes
-import ctypes.util
 import os
 import shlex
-import sys
 import signal
 import socket
 import subprocess
+import time
 import grpc
 import json
 import logging
+import signal
+import traceback
 from concurrent import futures
 from google.protobuf import json_format
+from typing import Callable
 
 import spdk.rpc
 import spdk.rpc.client as rpc_client
@@ -30,17 +31,38 @@ from proto import gateway_pb2_grpc as pb2_grpc
 from .state import GatewayState, LocalGatewayState, OmapGatewayState, GatewayStateHandler
 from .grpc import GatewayService
 
-libc = ctypes.CDLL(ctypes.util.find_library("c"))
-PR_SET_PDEATHSIG = 1
+def wait_for_condition(condition_method: Callable[[], bool], error_message=None, timeout=None, interval=1):
+    """Use the provided condition_method predicate to await a specific condition.
 
+       If the condition evaluates to False even after the timeout, raise a TimeoutError.
+    """
+    start_time = time.time()
 
-def set_pdeathsig(sig=signal.SIGTERM):
+    while True:
+        if condition_method():
+            return
 
-    def callable():
-        return libc.prctl(PR_SET_PDEATHSIG, sig)
+        if timeout is not None and time.time() - start_time >= timeout:
+            raise TimeoutError(f"Timeout: {error_message} after {timeout} seconds.")
 
-    return callable
+        time.sleep(interval)
 
+def sigchld_handler(signum, frame):
+    """Handle SIGCHLD, runs when a spdk process terminates."""
+    logger = logging.getLogger(__name__)
+    stack = '\n'.join(traceback.format_stack(frame))
+    logger.error(f"GatewayServer: GSIGCHLD received {signum=} stack=\n{stack}")
+
+    try:
+        pid, wait_status = os.waitpid(-1, os.WNOHANG)
+    except OSError as ose:
+        logger.error(f"waitpid error {ose}")
+        # eat the exception, in signal handler context
+
+    exit_code = os.waitstatus_to_exitcode(wait_status)
+
+    # GW process should exit now
+    raise SystemExit(f"spdk subprocess terminated pid {pid=} {exit_code=}")
 
 class GatewayServer:
     """Runs SPDK and receives client requests for the gateway service.
@@ -72,15 +94,11 @@ class GatewayServer:
 
     def __exit__(self, exc_type, exc_value, traceback):
         """Cleans up SPDK and server instances."""
+        if exc_type is not None:
+            self.logger.error("GatewayServer exception occurred:", exc_info=(exc_type, exc_value, traceback))
 
         if self.spdk_process is not None:
-            self.logger.info("Terminating SPDK...")
-            self.spdk_process.terminate()
-            try:
-                timeout = self.config.getfloat("spdk", "timeout")
-                self.spdk_process.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                self.spdk_process.kill()
+            self._stop_spdk()
 
         if self.server is not None:
             self.logger.info("Stopping the server...")
@@ -163,9 +181,11 @@ class GatewayServer:
             cmd += shlex.split(spdk_tgt_cmd_extra_args)
         self.logger.info(f"Starting {' '.join(cmd)}")
         try:
-            self.spdk_process = subprocess.Popen(cmd,
-                                                 preexec_fn=set_pdeathsig(
-                                                     signal.SIGTERM))
+            # install SIGCHLD handler
+            signal.signal(signal.SIGCHLD, sigchld_handler)
+
+            # start spdk process
+            self.spdk_process = subprocess.Popen(cmd)
         except Exception as ex:
             self.logger.error(f"Unable to start SPDK: \n {ex}")
             raise
@@ -180,6 +200,8 @@ class GatewayServer:
             f" conn_retries: {conn_retries}, timeout: {timeout}",
         })
         try:
+            wait_for_condition(lambda: os.path.exists(spdk_rpc_socket), f"file '{spdk_rpc_socket}' not found", timeout)
+            self.logger.info(f"Found rpc_socket: {spdk_rpc_socket}")
             self.spdk_rpc_client = rpc_client.JSONRPCClient(
                 spdk_rpc_socket,
                 None,
@@ -203,6 +225,39 @@ class GatewayServer:
                                                        "tcp")
         for trtype in spdk_transports.split():
             self._create_transport(trtype.lower())
+
+    def _stop_spdk(self):
+        """Stops SPDK process."""
+        assert self.spdk_process is not None # should be verified by the caller
+
+        return_code = self.spdk_process.returncode
+        rpc_socket = self.config.get("spdk", "rpc_socket")
+
+        # Terminate spdk process
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        if return_code is not None:
+            self.logger.error(f"SPDK({rpc_socket}) pid {self.spdk_process.pid} already terminated, exit code: {return_code}")
+        else:
+            self.logger.info(f"Terminating SPDK({rpc_socket}) pid {self.spdk_process.pid}...")
+            self.spdk_process.terminate()
+        try:
+            timeout = self.config.getfloat("spdk", "timeout")
+            stdout, stderr = self.spdk_process.communicate(timeout=timeout)
+            for pair in [(stdout, "stdout"), (stderr, "stderr")]:
+                stream, name = pair
+                if stream is not None:
+                    for line in stream.split():
+                        self.logger.error(f"SPDK {name}: {line}")
+        except subprocess.TimeoutExpired as te:
+            self.logger.error(f"SPDK({rpc_socket}) pid {self.spdk_process.pid} timeout occurred while terminating spdk: {te}")
+            self.spdk_process.kill() # kill -9, send KILL signal
+
+        # Clean spdk rpc socket
+        if os.path.exists(rpc_socket):
+            try:
+                os.remove(rpc_socket)
+            except Exception as e:
+                self.logger.error(f"An error occurred while removing rpc socket {rpc_socket}: {e}")
 
     def _create_transport(self, trtype):
         """Initializes a transport type."""
