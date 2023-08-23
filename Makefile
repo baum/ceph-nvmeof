@@ -1,6 +1,14 @@
 # Make config
 MAKEFLAGS += --no-builtin-rules --no-builtin-variables
 .SUFFIXES:
+build: export NVMEOF_GIT_BRANCH != git name-rev --name-only HEAD
+build: export NVMEOF_GIT_COMMIT != git rev-parse HEAD
+build: export SPDK_GIT_REPO != git -C spdk remote get-url origin
+build: export SPDK_GIT_BRANCH != git -C spdk name-rev --name-only HEAD
+build: export SPDK_GIT_COMMIT != git rev-parse HEAD:spdk
+build: export BUILD_DATE != date -u +"%Y-%m-%dT%H:%M:%SZ"
+
+build: export NVMEOF_VERSION = $NVMEOF_GIT_COMMIT
 
 # Includes
 include .env
@@ -19,13 +27,6 @@ setup: ## Configure huge-pages (requires sudo/root password)
 	@[ $$(cat $(HUGEPAGES_DIR)) -eq $(HUGEPAGES) ]
 
 build push pull logs: SVC ?= spdk nvmeof nvmeof-cli ceph
-
-build: export NVMEOF_GIT_BRANCH != git name-rev --name-only HEAD
-build: export NVMEOF_GIT_COMMIT != git rev-parse HEAD
-build: export SPDK_GIT_REPO != git -C spdk remote get-url origin
-build: export SPDK_GIT_BRANCH != git -C spdk name-rev --name-only HEAD
-build: export SPDK_GIT_COMMIT != git rev-parse HEAD:spdk
-build: export BUILD_DATE != date -u +"%Y-%m-%dT%H:%M:%SZ"
 
 up: ## Launch services
 up: SVC ?= ceph nvmeof ## Services
