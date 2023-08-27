@@ -127,9 +127,11 @@ class Connection:
     nvmeof_connect_data_hostnqn: str = field(default_factory=str)
     sq_head_ptr: int = 0
     unsent_log_page_len: int = 0
-    property_data: str = field(default_factory=str)
-    property_set: bool = False
     shutdown_now: bool = False
+    # See Figure 78: Offset 14h: CC – Controller Configuration
+    # NVM ExpressTM Revision 1.4, page 47
+    property_cc: (c_ubyte * 8) = (c_ubyte * 8)(0x00, 0x00, \
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
     controller_id: uuid = None
     gen_cnt: int = 0
     recv_async: bool = False
@@ -288,6 +290,8 @@ class DiscoveryLogEntry(AutoSerializableStructure):
         ("tsas", c_ubyte * 256)
     ]
 
+def u8_array(a):
+    return ' '.join(hex(v) for v in a)
 class DiscoveryService:
     """Implements discovery controller.
 
@@ -454,18 +458,24 @@ class DiscoveryService:
             # \x20 command sets supportd: 1 (NVM IO command set)?
             property_get.property_data = (c_ubyte * 8)(0x7f, 0x00, \
                 0x01, 0x1e, 0x20, 0x00, 0x00, 0x00)
+            self.logger.debug(f"get property CAPABILITIES data {u8_array(property_get.property_data)}")
         elif NVME_CTL(nvmeof_prop_get_set_offset) == NVME_CTL.CONFIGURATION:
-            # b'\x00\x00\x46\x00\x00\x00\x00\x00'
-            # 0x46: IO Submission Queue Entry Size: 0x6 (64 bytes)
-            # IO Completion Queue Entry Size: 0x4 (16 bytes)
-            property_get.property_data = self_conn.property_data
+            property_get.property_data = self_conn.property_cc
+            self.logger.debug(f"get property CONFIGURATION data {u8_array(property_get.property_data)}")
         elif NVME_CTL(nvmeof_prop_get_set_offset) == NVME_CTL.STATUS:
-            if len(self_conn.property_data) != 8:
-                self.logger.error("error property data.")
-                return -1
-            shutdown_notification = (self_conn.property_data[1] >> 6) & 0x3
+            # Check CC.SHN
+            # 15:14 RW 00b Shutdown Notification (SHN):
+            # The shutdown notification values are defined as:
+            # Value Definition
+            # 00b   No notification; no effect
+            # 01b   Normal shutdown notification
+            # 10b   Abrupt shutdown notification
+            # 11b   Reserved
+            shutdown_notification = (self_conn.property_cc[1] >> 6) & 0x3
             if shutdown_notification == 0:
-                if self_conn.property_set is True:
+                # check CC.EN bit
+                enabled = self_conn.property_cc[0] & 0x1
+                if enabled != 0:
                     # controller status: ready
                     property_get.property_data = (c_ubyte * 8)(0x01, 0x00, \
                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
@@ -473,10 +483,19 @@ class DiscoveryService:
                     property_get.property_data = (c_ubyte * 8)(0x00, 0x00, \
                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
             else:
-                # here shutdown_notification should be 0x1
+                # CC.SHN is set
+                # 0x09 = 1001b
+                # RDY  =  1b : The controller is ready
+                # SHST = 10b : Shutdown processing complete
                 property_get.property_data = (c_ubyte * 8)(0x09, 0x00, \
                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+                # After the host specifies a shutdown, the
+                # host may either disconnect at the NVMe Transport level or it
+                # may choose to poll CSTS.SHST to determine when the shutdown
+                # is complete (the controller should not initiate a disconnect
+                # at the NVMe Transport level).
                 self_conn.shutdown_now = True
+            self.logger.debug(f"get property STATUS data {u8_array(property_get.property_data)} (CC {self_conn.property_cc})")
         elif NVME_CTL(nvmeof_prop_get_set_offset) == NVME_CTL.VERSION:
             # nvme version: 1.3
             property_get.property_data = (c_ubyte * 8)(0x00, 0x03, \
@@ -507,8 +526,8 @@ class DiscoveryService:
         if NVME_CTL(nvmeof_prop_get_set_offset) == NVME_CTL.CAPABILITIES:
             self.logger.error("property setting of capabilities is not supported.")
         elif NVME_CTL(nvmeof_prop_get_set_offset) == NVME_CTL.CONFIGURATION:
-            self_conn.property_data = struct.unpack_from('<8B', data, 56)
-            self_conn.property_set = True
+            self_conn.property_cc = struct.unpack_from('<8B', data, 56)
+            self.logger.debug(f"set property CONFIGURATION {self_conn.property_cc}")
         elif NVME_CTL(nvmeof_prop_get_set_offset) == NVME_CTL.STATUS:
             self.logger.error("property setting of status is not supported.")
         elif NVME_CTL(nvmeof_prop_get_set_offset) == NVME_CTL.VERSION:
@@ -808,7 +827,8 @@ class DiscoveryService:
             self_conn.unsent_log_page_len -= nvme_data_len
             if self_conn.unsent_log_page_len == 0:
                 self_conn.log_page = b''
-                self_conn.property_set = False
+                self_conn.property_cc = (c_ubyte * 8)(0x00, 0x00, 0x00, 0x00, \
+                                        0x00, 0x00, 0x00, 0x00)
                 self_conn.allow_listeners = []
         else:
             self.logger.error("lenghth error. It need to be 16 or n*1024")
@@ -992,7 +1012,7 @@ class DiscoveryService:
                     except KeyError as e:
                         raise UnknownNVMEOpcode(opcode) from e
                 else:
-                    self.logger.error("unsupported pduGLOBAL_CNLID type: {pdu_type}")
+                    self.logger.error(f"unsupported pdu type: {pdu_type}")
 
                 if err == -1 or self_conn.shutdown_now is True:
                     del self.conn_vals[conn.fileno()]
