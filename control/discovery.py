@@ -806,6 +806,7 @@ class DiscoveryService:
         nvme_tcp_data_pdu.data_length = nvme_data_len
 
         # reply based on the received get log page request packet(length)
+        self.logger.debug(f"reply_get_log_page {nvme_data_len=} {nvme_get_logpage_numd=} {nvme_logpage_offset=} {nvme_sgl=}")
         if nvme_data_len == 16:
             # nvme cli version: 1.x
             nvme_get_log_page_reply = NVMeGetLogPage()
