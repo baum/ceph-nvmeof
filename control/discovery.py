@@ -807,13 +807,13 @@ class DiscoveryService:
 
         # reply based on the received get log page request packet(length)
         self.logger.debug(f"reply_get_log_page {nvme_data_len=} {nvme_get_logpage_numd=} {nvme_logpage_offset=} {nvme_sgl=}")
-        if nvme_data_len == 16:
+        if nvme_data_len == 16 or nvme_data_len == 8:
             # nvme cli version: 1.x
             nvme_get_log_page_reply = NVMeGetLogPage()
             nvme_get_log_page_reply.genctr = self_conn.gen_cnt
             nvme_get_log_page_reply.numrec = len(listeners)
 
-            reply = pdu_reply + nvme_tcp_data_pdu + bytes(nvme_get_log_page_reply)[:16]
+            reply = pdu_reply + nvme_tcp_data_pdu + bytes(nvme_get_log_page_reply)[:nvme_data_len]
         elif nvme_data_len == 1024 and nvme_logpage_offset == 0:
             # nvme cli version: 2.x
             nvme_get_log_page_reply = NVMeGetLogPage()
