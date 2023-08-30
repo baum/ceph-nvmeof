@@ -3,7 +3,7 @@
 # Docker and docker-compose specific commands
 DOCKER = docker
 DOCKER_COMPOSE = docker-compose ## Docker-compose command
-DOCKER_COMPOSE_COMMANDS = pull build push up run exec ps top images logs port \
+DOCKER_COMPOSE_COMMANDS = pull build up run exec ps top images logs port \
 	pause unpause stop restart down events
 
 OPTS ?= ## Docker-compose subcommand options
