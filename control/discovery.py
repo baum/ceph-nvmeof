@@ -786,13 +786,13 @@ class DiscoveryService:
         nvme_tcp_data_pdu.data_length = nvme_data_len
 
         # reply based on the received get log page request packet(length)
-        if nvme_data_len == 16:
+        if nvme_data_len < 1024:
             # nvme cli version: 1.x
             nvme_get_log_page_reply = NVMeGetLogPage()
             nvme_get_log_page_reply.genctr = self_conn.gen_cnt
             nvme_get_log_page_reply.numrec = len(listeners)
 
-            reply = pdu_reply + nvme_tcp_data_pdu + bytes(nvme_get_log_page_reply)[:16]
+            reply = pdu_reply + nvme_tcp_data_pdu + bytes(nvme_get_log_page_reply)[:nvme_data_len]
         elif nvme_data_len == 1024 and nvme_logpage_offset == 0:
             # nvme cli version: 2.x
             nvme_get_log_page_reply = NVMeGetLogPage()
@@ -809,7 +809,7 @@ class DiscoveryService:
                 self_conn.log_page = b''
                 self_conn.allow_listeners = []
         else:
-            self.logger.error("request log page lenghth error. It need to be 16 or n*1024")
+            self.logger.error(f"request log page: invalid length error {nvme_data_len=}")
             return -1
         try:
             conn.sendall(reply)
