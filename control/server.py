@@ -225,8 +225,9 @@ class GatewayServer:
             self.logger.error(f"SPDK({self.name}) pid {self.spdk_process.pid} "
                               f"already terminated, exit code: {return_code}")
         else:
-            self.logger.info(f"Terminating SPDK({self.name}) pid {self.spdk_process.pid}...")
-            self.spdk_process.terminate()
+            self.logger.info(f"Aborting SPDK({self.name}) pid {self.spdk_process.pid}...")
+            self.spdk_process.send_signal(signal.SIGABRT)
+
         try:
             timeout = self.config.getfloat("spdk", "timeout")
             self.spdk_process.communicate(timeout=timeout)
