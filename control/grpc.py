@@ -13,6 +13,7 @@ import json
 import uuid
 import random
 import logging
+import errno
 
 import spdk.rpc.bdev as rpc_bdev
 import spdk.rpc.nvmf as rpc_nvmf
@@ -35,16 +36,44 @@ class GatewayService(pb2_grpc.GatewayServicer):
         spdk_rpc_client: Client of SPDK RPC server
     """
 
-    def __init__(self, config, gateway_state, spdk_rpc_client) -> None:
+    def __init__(self, config, gateway_state, omap_state, spdk_rpc_client) -> None:
         """Constructor"""
         self.logger = logging.getLogger(__name__)
         self.config = config
         self.gateway_state = gateway_state
+        self.omap_state = omap_state
         self.spdk_rpc_client = spdk_rpc_client
         self.gateway_name = self.config.get("gateway", "name")
         if not self.gateway_name:
             self.gateway_name = socket.gethostname()
+        self.omap_file_lock_duration = self.config.getint_with_default("gateway", "omap_file_lock_duration", 60)
+        self.omap_file_update_retries = self.config.getint_with_default("gateway", "omap_file_update_retries", 10)
+        self.enter_args = {}
         self._init_cluster_context()
+
+    def __call__(self, **kwargs):
+        self.enter_args.clear()
+        self.enter_args.update(kwargs)
+        return self
+
+    #
+    # We pass the context from the different functions here. It should point to a real object in case we come from a real
+    # resource changing function, resulting from a CLI command. It will be None in case we come from an automatic update
+    # which is done because the local state is out of date. In case context is None, that is we're in the middle of an update
+    # we should not try to lock the OMAP file as the code will not try to make changes there, only the local spdk calls
+    # are done in such a case.
+    #
+    def __enter__(self):
+        context = self.enter_args.get("context")
+        if context:
+            self.lock_and_update_omap_file()
+        return self
+
+    def __exit__(self, typ, value, traceback):
+        context = self.enter_args.get("context")
+        self.enter_args.clear()
+        if context:
+            self.omap_state.unlock_omap()
 
     def _init_cluster_context(self) -> None:
         """Init cluster context management variables"""
@@ -86,6 +115,37 @@ class GatewayService(pb2_grpc.GatewayServicer):
         )
         return name
 
+    def lock_and_update_omap_file(self):
+        if self.omap_file_lock_duration <= 0:
+            self.logger.warning(f"Will not lock OMAP file, lock duration is not positive")
+            return
+
+        need_to_update = False
+        for i in range(1, self.omap_file_update_retries):
+            try:
+                if need_to_update:
+                    self.logger.warning(f"An update is required before locking the OMAP file")
+                    try:
+                        self.gateway_state.update()
+                        need_to_update = False
+                    except Exception as ex:
+                        self.logger.warning(f"Got an exception while updating: {ex}")
+                self.omap_state.lock_omap(self.omap_file_lock_duration)
+                break
+            except OSError as err:
+                if err.errno == errno.EAGAIN:
+                    self.logger.warning(f"Error locking OMAP file. The file is not current, will read the file and try again")
+                    need_to_update = True
+                else:
+                    self.logger.error(f"Error locking OMAP file, got exception: {err}")
+                    raise
+            except Exception as ex:
+                self.logger.error(f"Error locking OMAP file, exception: {ex}")
+                raise
+
+        if need_to_update:
+            raise Exception(f"Unable to lock OMAP file after updating {self.omap_file_update_retries} times, exiting")
+
     def create_bdev(self, request, context=None):
         """Creates a bdev from an RBD image."""
 
@@ -96,34 +156,35 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.logger.info(f"Received request to create bdev {name} from"
                          f" {request.rbd_pool_name}/{request.rbd_image_name}"
                          f" with block size {request.block_size}")
-        try:
-            bdev_name = rpc_bdev.bdev_rbd_create(
-                self.spdk_rpc_client,
-                name=name,
-                cluster_name=self._get_cluster(),
-                pool_name=request.rbd_pool_name,
-                rbd_name=request.rbd_image_name,
-                block_size=request.block_size,
-                uuid=request.uuid,
-            )
-            self.logger.info(f"create_bdev: {bdev_name}")
-        except Exception as ex:
-            self.logger.error(f"create_bdev failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.bdev()
-
-        if context:
-            # Update gateway state
+        with self(context=context):
             try:
-                json_req = json_format.MessageToJson(
-                    request, preserving_proto_field_name=True)
-                self.gateway_state.add_bdev(bdev_name, json_req)
+                bdev_name = rpc_bdev.bdev_rbd_create(
+                    self.spdk_rpc_client,
+                    name=name,
+                    cluster_name=self._get_cluster(),
+                    pool_name=request.rbd_pool_name,
+                    rbd_name=request.rbd_image_name,
+                    block_size=request.block_size,
+                    uuid=request.uuid,
+                )
+                self.logger.info(f"create_bdev: {bdev_name}")
             except Exception as ex:
-                self.logger.error(
-                    f"Error persisting create_bdev {bdev_name}: {ex}")
-                raise
+                self.logger.error(f"create_bdev failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.bdev()
+
+            if context:
+                # Update gateway state
+                try:
+                    json_req = json_format.MessageToJson(
+                        request, preserving_proto_field_name=True)
+                    self.gateway_state.add_bdev(bdev_name, json_req)
+                except Exception as ex:
+                    self.logger.error(
+                        f"Error persisting create_bdev {bdev_name}: {ex}")
+                    raise
 
         return pb2.bdev(bdev_name=bdev_name, status=True)
 
@@ -132,57 +193,65 @@ class GatewayService(pb2_grpc.GatewayServicer):
 
         self.logger.info(f"Received request to delete bdev {request.bdev_name}")
         use_excep = None
-        req_get_subsystems = pb2.get_subsystems_req()
-        ret = self.get_subsystems(req_get_subsystems, context)
-        subsystems = json.loads(ret.subsystems)
-        for subsystem in subsystems:
-            for namespace in subsystem['namespaces']:
-                if namespace['bdev_name'] == request.bdev_name:
-                    # We found a namespace still using this bdev. If --force was used we will try to remove this namespace.
-                    # Otherwise fail with EBUSY
-                    if request.force:
-                        self.logger.info(f"Will remove namespace {namespace['nsid']} from {subsystem['nqn']} as it is using bdev {request.bdev_name}")
-                        try:
-                            req_rm_ns = pb2.remove_namespace_req(subsystem_nqn=subsystem['nqn'], nsid=namespace['nsid'])
-                            ret = self.remove_namespace(req_rm_ns, context)
-                            self.logger.info(
-                                    f"Removed namespace {namespace['nsid']} from {subsystem['nqn']}: {ret.status}")
-                        except Exception as ex:
-                            self.logger.error(f"Error removing namespace {namespace['nsid']} from {subsystem['nqn']}, will delete bdev {request.bdev_name} anyway: {ex}")
-                            pass
-                    else:
-                        self.logger.error(f"Namespace {namespace['nsid']} from {subsystem['nqn']} is still using bdev {request.bdev_name}. You need to either remove it or use the '--force' command line option")
-                        req = {"name": request.bdev_name, "method": "bdev_rbd_delete", "req_id": 0}
-                        ret = {"code": -16, "message": "Device or resource busy"}
-                        msg = "\n".join(["request:", "%s" % json.dumps(req, indent=2),
-                            "Got JSON-RPC error response",
-                            "response:",
-                            json.dumps(ret, indent=2)])
-                        use_excep = Exception(msg)
-
-        try:
-            if use_excep:
-                raise use_excep
-            ret = rpc_bdev.bdev_rbd_delete(
-                self.spdk_rpc_client,
-                request.bdev_name,
-            )
-            self.logger.info(f"delete_bdev {request.bdev_name}: {ret}")
-        except Exception as ex:
-            self.logger.error(f"delete_bdev failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.req_status()
 
         if context:
-            # Update gateway state
+            req_get_subsystems = pb2.get_subsystems_req()
+            ret = self.get_subsystems(req_get_subsystems, context)
+            subsystems = json.loads(ret.subsystems)
+            for subsystem in subsystems:
+                if use_excep is not None:
+                    break
+                for namespace in subsystem['namespaces']:
+                    if use_excep is not None:
+                        break
+                    if namespace['bdev_name'] == request.bdev_name:
+                        # We found a namespace still using this bdev. If --force was used we will try to remove this namespace.
+                        # Otherwise fail with EBUSY
+                        if request.force:
+                            self.logger.info(f"Will remove namespace {namespace['nsid']} from {subsystem['nqn']} as it is using bdev {request.bdev_name}")
+                            try:
+                                req_rm_ns = pb2.remove_namespace_req(subsystem_nqn=subsystem['nqn'], nsid=namespace['nsid'])
+                                ret = self.remove_namespace(req_rm_ns, context)
+                                self.logger.info(
+                                        f"Removed namespace {namespace['nsid']} from {subsystem['nqn']}: {ret.status}")
+                            except Exception as ex:
+                                self.logger.error(f"Error removing namespace {namespace['nsid']} from {subsystem['nqn']}, will delete bdev {request.bdev_name} anyway: {ex}")
+                                pass
+                        else:
+                            self.logger.error(f"Namespace {namespace['nsid']} from {subsystem['nqn']} is still using bdev {request.bdev_name}. You need to either remove it or use the '--force' command line option")
+                            req = {"name": request.bdev_name, "method": "bdev_rbd_delete", "req_id": 0}
+                            ret = {"code": -errno.EBUSY, "message": "Device or resource busy"}
+                            msg = "\n".join(["request:", "%s" % json.dumps(req, indent=2),
+                                "Got JSON-RPC error response",
+                                "response:",
+                                json.dumps(ret, indent=2)])
+                            use_excep = Exception(msg)
+
+        # If we're about to just throw an exception there is no need to lock the OMAP file so just pass None as context
+        with self(context=context if not use_excep else None):
             try:
-                self.gateway_state.remove_bdev(request.bdev_name)
+                if use_excep:
+                    raise use_excep
+                ret = rpc_bdev.bdev_rbd_delete(
+                    self.spdk_rpc_client,
+                    request.bdev_name,
+                )
+                self.logger.info(f"delete_bdev {request.bdev_name}: {ret}")
             except Exception as ex:
-                self.logger.error(
-                    f"Error persisting delete_bdev {request.bdev_name}: {ex}")
-                raise
+                self.logger.error(f"delete_bdev failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.req_status()
+
+            if context:
+                # Update gateway state
+                try:
+                    self.gateway_state.remove_bdev(request.bdev_name)
+                except Exception as ex:
+                    self.logger.error(
+                        f"Error persisting delete_bdev {request.bdev_name}: {ex}")
+                    raise
 
         return pb2.req_status(status=ret)
 
@@ -197,34 +266,36 @@ class GatewayService(pb2_grpc.GatewayServicer):
             random.seed()
             randser = random.randint(2, 99999999999999)
             request.serial_number = f"SPDK{randser}"
-        try:
-            ret = rpc_nvmf.nvmf_create_subsystem(
-                self.spdk_rpc_client,
-                nqn=request.subsystem_nqn,
-                serial_number=request.serial_number,
-                max_namespaces=request.max_namespaces,
-                min_cntlid=min_cntlid,
-                max_cntlid=max_cntlid,
-            )
-            self.logger.info(f"create_subsystem {request.subsystem_nqn}: {ret}")
-        except Exception as ex:
-            self.logger.error(f"create_subsystem failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.req_status()
 
-        if context:
-            # Update gateway state
+        with self(context=context):
             try:
-                json_req = json_format.MessageToJson(
-                    request, preserving_proto_field_name=True)
-                self.gateway_state.add_subsystem(request.subsystem_nqn,
-                                                 json_req)
+                ret = rpc_nvmf.nvmf_create_subsystem(
+                    self.spdk_rpc_client,
+                    nqn=request.subsystem_nqn,
+                    serial_number=request.serial_number,
+                    max_namespaces=request.max_namespaces,
+                    min_cntlid=min_cntlid,
+                    max_cntlid=max_cntlid,
+                )
+                self.logger.info(f"create_subsystem {request.subsystem_nqn}: {ret}")
             except Exception as ex:
-                self.logger.error(f"Error persisting create_subsystem"
-                                  f" {request.subsystem_nqn}: {ex}")
-                raise
+                self.logger.error(f"create_subsystem failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.req_status()
+
+            if context:
+                # Update gateway state
+                try:
+                    json_req = json_format.MessageToJson(
+                        request, preserving_proto_field_name=True)
+                    self.gateway_state.add_subsystem(request.subsystem_nqn,
+                                                     json_req)
+                except Exception as ex:
+                    self.logger.error(f"Error persisting create_subsystem"
+                                      f" {request.subsystem_nqn}: {ex}")
+                    raise
 
         return pb2.req_status(status=ret)
 
@@ -233,27 +304,29 @@ class GatewayService(pb2_grpc.GatewayServicer):
 
         self.logger.info(
             f"Received request to delete subsystem {request.subsystem_nqn}")
-        try:
-            ret = rpc_nvmf.nvmf_delete_subsystem(
-                self.spdk_rpc_client,
-                nqn=request.subsystem_nqn,
-            )
-            self.logger.info(f"delete_subsystem {request.subsystem_nqn}: {ret}")
-        except Exception as ex:
-            self.logger.error(f"delete_subsystem failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.req_status()
 
-        if context:
-            # Update gateway state
+        with self(context=context):
             try:
-                self.gateway_state.remove_subsystem(request.subsystem_nqn)
+                ret = rpc_nvmf.nvmf_delete_subsystem(
+                    self.spdk_rpc_client,
+                    nqn=request.subsystem_nqn,
+                )
+                self.logger.info(f"delete_subsystem {request.subsystem_nqn}: {ret}")
             except Exception as ex:
-                self.logger.error(f"Error persisting delete_subsystem"
-                                  f" {request.subsystem_nqn}: {ex}")
-                raise
+                self.logger.error(f"delete_subsystem failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.req_status()
+
+            if context:
+                # Update gateway state
+                try:
+                    self.gateway_state.remove_subsystem(request.subsystem_nqn)
+                except Exception as ex:
+                    self.logger.error(f"Error persisting delete_subsystem"
+                                      f" {request.subsystem_nqn}: {ex}")
+                    raise
 
         return pb2.req_status(status=ret)
 
@@ -262,34 +335,36 @@ class GatewayService(pb2_grpc.GatewayServicer):
 
         self.logger.info(f"Received request to add {request.bdev_name} to"
                          f" {request.subsystem_nqn}")
-        try:
-            nsid = rpc_nvmf.nvmf_subsystem_add_ns(
-                self.spdk_rpc_client,
-                nqn=request.subsystem_nqn,
-                bdev_name=request.bdev_name,
-                nsid=request.nsid,
-            )
-            self.logger.info(f"add_namespace: {nsid}")
-        except Exception as ex:
-            self.logger.error(f"add_namespace failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.nsid()
 
-        if context:
-            # Update gateway state
+        with self(context=context):
             try:
-                if not request.nsid:
-                    request.nsid = nsid
-                json_req = json_format.MessageToJson(
-                    request, preserving_proto_field_name=True)
-                self.gateway_state.add_namespace(request.subsystem_nqn,
-                                                 str(nsid), json_req)
+                nsid = rpc_nvmf.nvmf_subsystem_add_ns(
+                    self.spdk_rpc_client,
+                    nqn=request.subsystem_nqn,
+                    bdev_name=request.bdev_name,
+                    nsid=request.nsid,
+                )
+                self.logger.info(f"add_namespace: {nsid}")
             except Exception as ex:
-                self.logger.error(
-                    f"Error persisting add_namespace {nsid}: {ex}")
-                raise
+                self.logger.error(f"add_namespace failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.nsid()
+
+            if context:
+                # Update gateway state
+                try:
+                    if not request.nsid:
+                        request.nsid = nsid
+                    json_req = json_format.MessageToJson(
+                        request, preserving_proto_field_name=True)
+                    self.gateway_state.add_namespace(request.subsystem_nqn,
+                                                     str(nsid), json_req)
+                except Exception as ex:
+                    self.logger.error(
+                        f"Error persisting add_namespace {nsid}: {ex}")
+                    raise
 
         return pb2.nsid(nsid=nsid, status=True)
 
@@ -298,115 +373,119 @@ class GatewayService(pb2_grpc.GatewayServicer):
 
         self.logger.info(f"Received request to remove {request.nsid} from"
                          f" {request.subsystem_nqn}")
-        try:
-            ret = rpc_nvmf.nvmf_subsystem_remove_ns(
-                self.spdk_rpc_client,
-                nqn=request.subsystem_nqn,
-                nsid=request.nsid,
-            )
-            self.logger.info(f"remove_namespace {request.nsid}: {ret}")
-        except Exception as ex:
-            self.logger.error(f"remove_namespace failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.req_status()
 
-        if context:
-            # Update gateway state
+        with self(context=context):
             try:
-                self.gateway_state.remove_namespace(request.subsystem_nqn,
-                                                    str(request.nsid))
+                ret = rpc_nvmf.nvmf_subsystem_remove_ns(
+                    self.spdk_rpc_client,
+                    nqn=request.subsystem_nqn,
+                    nsid=request.nsid,
+                )
+                self.logger.info(f"remove_namespace {request.nsid}: {ret}")
             except Exception as ex:
-                self.logger.error(
-                    f"Error persisting remove_namespace {request.nsid}: {ex}")
-                raise
+                self.logger.error(f"remove_namespace failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.req_status()
+
+            if context:
+                # Update gateway state
+                try:
+                    self.gateway_state.remove_namespace(request.subsystem_nqn,
+                                                        str(request.nsid))
+                except Exception as ex:
+                    self.logger.error(
+                        f"Error persisting remove_namespace {request.nsid}: {ex}")
+                    raise
 
         return pb2.req_status(status=ret)
 
     def add_host(self, request, context=None):
         """Adds a host to a subsystem."""
 
-        try:
-            if request.host_nqn == "*":  # Allow any host access to subsystem
-                self.logger.info(f"Received request to allow any host to"
-                                 f" {request.subsystem_nqn}")
-                ret = rpc_nvmf.nvmf_subsystem_allow_any_host(
-                    self.spdk_rpc_client,
-                    nqn=request.subsystem_nqn,
-                    disable=False,
-                )
-                self.logger.info(f"add_host *: {ret}")
-            else:  # Allow single host access to subsystem
-                self.logger.info(
-                    f"Received request to add host {request.host_nqn} to"
-                    f" {request.subsystem_nqn}")
-                ret = rpc_nvmf.nvmf_subsystem_add_host(
-                    self.spdk_rpc_client,
-                    nqn=request.subsystem_nqn,
-                    host=request.host_nqn,
-                )
-                self.logger.info(f"add_host {request.host_nqn}: {ret}")
-        except Exception as ex:
-            self.logger.error(f"add_host failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.req_status()
-
-        if context:
-            # Update gateway state
+        with self(context=context):
             try:
-                json_req = json_format.MessageToJson(
-                    request, preserving_proto_field_name=True)
-                self.gateway_state.add_host(request.subsystem_nqn,
-                                            request.host_nqn, json_req)
+                if request.host_nqn == "*":  # Allow any host access to subsystem
+                    self.logger.info(f"Received request to allow any host to"
+                                     f" {request.subsystem_nqn}")
+                    ret = rpc_nvmf.nvmf_subsystem_allow_any_host(
+                        self.spdk_rpc_client,
+                        nqn=request.subsystem_nqn,
+                        disable=False,
+                    )
+                    self.logger.info(f"add_host *: {ret}")
+                else:  # Allow single host access to subsystem
+                    self.logger.info(
+                        f"Received request to add host {request.host_nqn} to"
+                        f" {request.subsystem_nqn}")
+                    ret = rpc_nvmf.nvmf_subsystem_add_host(
+                        self.spdk_rpc_client,
+                        nqn=request.subsystem_nqn,
+                        host=request.host_nqn,
+                    )
+                    self.logger.info(f"add_host {request.host_nqn}: {ret}")
             except Exception as ex:
-                self.logger.error(
-                    f"Error persisting add_host {request.host_nqn}: {ex}")
-                raise
+                self.logger.error(f"add_host failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.req_status()
+
+            if context:
+                # Update gateway state
+                try:
+                    json_req = json_format.MessageToJson(
+                        request, preserving_proto_field_name=True)
+                    self.gateway_state.add_host(request.subsystem_nqn,
+                                                request.host_nqn, json_req)
+                except Exception as ex:
+                    self.logger.error(
+                        f"Error persisting add_host {request.host_nqn}: {ex}")
+                    raise
 
         return pb2.req_status(status=ret)
 
     def remove_host(self, request, context=None):
         """Removes a host from a subsystem."""
 
-        try:
-            if request.host_nqn == "*":  # Disable allow any host access
-                self.logger.info(
-                    f"Received request to disable any host access to"
-                    f" {request.subsystem_nqn}")
-                ret = rpc_nvmf.nvmf_subsystem_allow_any_host(
-                    self.spdk_rpc_client,
-                    nqn=request.subsystem_nqn,
-                    disable=True,
-                )
-                self.logger.info(f"remove_host *: {ret}")
-            else:  # Remove single host access to subsystem
-                self.logger.info(
-                    f"Received request to remove host_{request.host_nqn} from"
-                    f" {request.subsystem_nqn}")
-                ret = rpc_nvmf.nvmf_subsystem_remove_host(
-                    self.spdk_rpc_client,
-                    nqn=request.subsystem_nqn,
-                    host=request.host_nqn,
-                )
-                self.logger.info(f"remove_host {request.host_nqn}: {ret}")
-        except Exception as ex:
-            self.logger.error(f"remove_host failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.req_status()
-
-        if context:
-            # Update gateway state
+        with self(context=context):
             try:
-                self.gateway_state.remove_host(request.subsystem_nqn,
-                                               request.host_nqn)
+                if request.host_nqn == "*":  # Disable allow any host access
+                    self.logger.info(
+                        f"Received request to disable any host access to"
+                        f" {request.subsystem_nqn}")
+                    ret = rpc_nvmf.nvmf_subsystem_allow_any_host(
+                        self.spdk_rpc_client,
+                        nqn=request.subsystem_nqn,
+                        disable=True,
+                    )
+                    self.logger.info(f"remove_host *: {ret}")
+                else:  # Remove single host access to subsystem
+                    self.logger.info(
+                        f"Received request to remove host_{request.host_nqn} from"
+                        f" {request.subsystem_nqn}")
+                    ret = rpc_nvmf.nvmf_subsystem_remove_host(
+                        self.spdk_rpc_client,
+                        nqn=request.subsystem_nqn,
+                        host=request.host_nqn,
+                    )
+                    self.logger.info(f"remove_host {request.host_nqn}: {ret}")
             except Exception as ex:
-                self.logger.error(f"Error persisting remove_host: {ex}")
-                raise
+                self.logger.error(f"remove_host failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.req_status()
+
+            if context:
+                # Update gateway state
+                try:
+                    self.gateway_state.remove_host(request.subsystem_nqn,
+                                                   request.host_nqn)
+                except Exception as ex:
+                    self.logger.error(f"Error persisting remove_host: {ex}")
+                    raise
 
         return pb2.req_status(status=ret)
 
@@ -417,40 +496,44 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.logger.info(f"Received request to create {request.gateway_name}"
                          f" {request.trtype} listener for {request.nqn} at"
                          f" {request.traddr}:{request.trsvcid}.")
-        try:
-            if request.gateway_name == self.gateway_name:
-                ret = rpc_nvmf.nvmf_subsystem_add_listener(
-                    self.spdk_rpc_client,
-                    nqn=request.nqn,
-                    trtype=request.trtype,
-                    traddr=request.traddr,
-                    trsvcid=request.trsvcid,
-                    adrfam=request.adrfam,
-                )
-                self.logger.info(f"create_listener: {ret}")
-            else:
-                raise Exception(f"Gateway name must match current gateway"
-                                f" ({self.gateway_name})")
-        except Exception as ex:
-            self.logger.error(f"create_listener failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.req_status()
+        gateway_name_is_ok = request.gateway_name == self.gateway_name
 
-        if context:
-            # Update gateway state
+        # If the gateway name is wrong we will just throw an exception, so there is no point in locking OMAP file
+        with self(context=context if gateway_name_is_ok else None):
             try:
-                json_req = json_format.MessageToJson(
-                    request, preserving_proto_field_name=True)
-                self.gateway_state.add_listener(request.nqn,
-                                                request.gateway_name,
-                                                request.trtype, request.traddr,
-                                                request.trsvcid, json_req)
+                if gateway_name_is_ok:
+                    ret = rpc_nvmf.nvmf_subsystem_add_listener(
+                        self.spdk_rpc_client,
+                        nqn=request.nqn,
+                        trtype=request.trtype,
+                        traddr=request.traddr,
+                        trsvcid=request.trsvcid,
+                        adrfam=request.adrfam,
+                    )
+                    self.logger.info(f"create_listener: {ret}")
+                else:
+                    raise Exception(f"Gateway name must match current gateway"
+                                    f" ({self.gateway_name})")
             except Exception as ex:
-                self.logger.error(
-                    f"Error persisting add_listener {request.trsvcid}: {ex}")
-                raise
+                self.logger.error(f"create_listener failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.req_status()
+
+            if context:
+                # Update gateway state
+                try:
+                    json_req = json_format.MessageToJson(
+                        request, preserving_proto_field_name=True)
+                    self.gateway_state.add_listener(request.nqn,
+                                                    request.gateway_name,
+                                                    request.trtype, request.traddr,
+                                                    request.trsvcid, json_req)
+                except Exception as ex:
+                    self.logger.error(
+                        f"Error persisting add_listener {request.trsvcid}: {ex}")
+                    raise
 
         return pb2.req_status(status=ret)
 
@@ -461,39 +544,43 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.logger.info(f"Received request to delete {request.gateway_name}"
                          f" {request.trtype} listener for {request.nqn} at"
                          f" {request.traddr}:{request.trsvcid}.")
-        try:
-            if request.gateway_name == self.gateway_name:
-                ret = rpc_nvmf.nvmf_subsystem_remove_listener(
-                    self.spdk_rpc_client,
-                    nqn=request.nqn,
-                    trtype=request.trtype,
-                    traddr=request.traddr,
-                    trsvcid=request.trsvcid,
-                    adrfam=request.adrfam,
-                )
-                self.logger.info(f"delete_listener: {ret}")
-            else:
-                raise Exception(f"Gateway name must match current gateway"
-                                f" ({self.gateway_name})")
-        except Exception as ex:
-            self.logger.error(f"delete_listener failed with: \n {ex}")
-            if context:
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(f"{ex}")
-            return pb2.req_status()
+        gateway_name_is_ok = request.gateway_name == self.gateway_name
 
-        if context:
-            # Update gateway state
+        # If the gateway name is wrong we will just throw an exception, so there is no point in locking OMAP file
+        with self(context=context if gateway_name_is_ok else None):
             try:
-                self.gateway_state.remove_listener(request.nqn,
-                                                   request.gateway_name,
-                                                   request.trtype,
-                                                   request.traddr,
-                                                   request.trsvcid)
+                if gateway_name_is_ok:
+                    ret = rpc_nvmf.nvmf_subsystem_remove_listener(
+                        self.spdk_rpc_client,
+                        nqn=request.nqn,
+                        trtype=request.trtype,
+                        traddr=request.traddr,
+                        trsvcid=request.trsvcid,
+                        adrfam=request.adrfam,
+                    )
+                    self.logger.info(f"delete_listener: {ret}")
+                else:
+                    raise Exception(f"Gateway name must match current gateway"
+                                    f" ({self.gateway_name})")
             except Exception as ex:
-                self.logger.error(
-                    f"Error persisting delete_listener {request.trsvcid}: {ex}")
-                raise
+                self.logger.error(f"delete_listener failed with: \n {ex}")
+                if context:
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"{ex}")
+                return pb2.req_status()
+
+            if context:
+                # Update gateway state
+                try:
+                    self.gateway_state.remove_listener(request.nqn,
+                                                       request.gateway_name,
+                                                       request.trtype,
+                                                       request.traddr,
+                                                       request.trsvcid)
+                except Exception as ex:
+                    self.logger.error(
+                        f"Error persisting delete_listener {request.trsvcid}: {ex}")
+                    raise
 
         return pb2.req_status(status=ret)
 

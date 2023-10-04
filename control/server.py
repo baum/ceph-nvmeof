@@ -100,7 +100,7 @@ class GatewayServer:
         local_state = LocalGatewayState()
         gateway_state = GatewayStateHandler(self.config, local_state,
                                             omap_state, self.gateway_rpc_caller)
-        self.gateway_rpc = GatewayService(self.config, gateway_state,
+        self.gateway_rpc = GatewayService(self.config, gateway_state, omap_state,
                                           self.spdk_rpc_client)
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
         pb2_grpc.add_GatewayServicer_to_server(self.gateway_rpc, self.server)

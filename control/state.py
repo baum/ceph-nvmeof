@@ -11,6 +11,7 @@ import time
 import threading
 import rados
 import logging
+import errno
 from typing import Dict
 from collections import defaultdict
 from abc import ABC, abstractmethod
@@ -162,6 +163,8 @@ class OmapGatewayState(GatewayState):
     """
 
     OMAP_VERSION_KEY = "omap_version"
+    OMAP_FILE_LOCK_NAME = "omap_file_lock"
+    OMAP_FILE_LOCK_COOKIE = "omap_file_cookie"
 
     def __init__(self, config):
         self.config = config
@@ -173,6 +176,8 @@ class OmapGatewayState(GatewayState):
         ceph_pool = self.config.get("ceph", "pool")
         ceph_conf = self.config.get("ceph", "config_file")
         rados_id = self.config.get_with_default("ceph", "id", "")
+        self.omap_file_lock_retries = self.config.getint_with_default("gateway", "omap_file_lock_retries", 15)
+        self.omap_file_lock_retry_sleep_interval = self.config.getint_with_default("gateway", "omap_file_lock_retry_sleep_interval", 5)
 
         try:
             conn = rados.Rados(conffile=ceph_conf, rados_id=rados_id)
@@ -221,6 +226,49 @@ class OmapGatewayState(GatewayState):
                 f"Read of OMAP version key ({self.OMAP_VERSION_KEY}) returns"
                 f" invalid number of values ({value_list}).")
             raise
+
+    def lock_omap(self, duration):
+        got_lock = False
+
+        for i in range(1, self.omap_file_lock_retries):
+            try:
+                with rados.WriteOpCtx() as write_op:
+                    self.ioctx.lock_exclusive(self.omap_name, self.OMAP_FILE_LOCK_NAME, self.OMAP_FILE_LOCK_COOKIE, "OMAP file changes lock", duration, 0)
+                    got_lock = True
+                    break
+            except rados.ObjectExists as ex:
+                self.logger.info(f"We already locked the OMAP file")
+                got_lock = True
+                break
+            except rados.ObjectBusy as ex:
+                self.logger.warning(f"Someone else locked the OMAP file, will try again in {self.omap_file_lock_retry_sleep_interval} seconds")
+                time.sleep(self.omap_file_lock_retry_sleep_interval)
+            except Exception as ex:
+                self.logger.error(f"Unable to lock OMAP file: {ex}. Exiting!")
+                raise
+
+        if not got_lock:
+            self.logger.error(f"Unable to lock OMAP file after {self.omap_file_lock_retries} retries. Exiting!")
+            raise Exception("Unable to lock OMAP file")
+
+        omap_version = self.get_omap_version()
+
+        if omap_version > self.version:
+            self.logger.warning(f"Local version {self.version} differs from OMAP file version {omap_version}, need to read the OMAP file")
+            self.unlock_omap()
+            raise OSError(errno.EAGAIN, "Unable to lock OMAP file, file not current", self.omap_name)
+
+        return True
+
+    def unlock_omap(self):
+        try:
+            with rados.WriteOpCtx() as write_op:
+                self.ioctx.unlock(self.omap_name, self.OMAP_FILE_LOCK_NAME, self.OMAP_FILE_LOCK_COOKIE)
+        except rados.ObjectNotFound as ex:
+            self.logger.warning(f"No such lock, the lock duration might have passed")
+        except Exception as ex:
+            self.logger.error(f"Unable to unlock OMAP file: {ex}.")
+            pass
 
     def get_state(self) -> Dict[str, str]:
         """Returns dict of all OMAP keys and values."""
