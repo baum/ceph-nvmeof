@@ -23,6 +23,7 @@ from .proto import gateway_pb2 as pb2
 from .proto import gateway_pb2_grpc as pb2_grpc
 
 
+
 class GatewayService(pb2_grpc.GatewayServicer):
     """Implements gateway service interface.
 
@@ -50,30 +51,6 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.omap_file_update_retries = self.config.getint_with_default("gateway", "omap_file_update_retries", 10)
         self.enter_args = {}
         self._init_cluster_context()
-
-    def __call__(self, **kwargs):
-        self.enter_args.clear()
-        self.enter_args.update(kwargs)
-        return self
-
-    #
-    # We pass the context from the different functions here. It should point to a real object in case we come from a real
-    # resource changing function, resulting from a CLI command. It will be None in case we come from an automatic update
-    # which is done because the local state is out of date. In case context is None, that is we're in the middle of an update
-    # we should not try to lock the OMAP file as the code will not try to make changes there, only the local spdk calls
-    # are done in such a case.
-    #
-    def __enter__(self):
-        context = self.enter_args.get("context")
-        if context:
-            self.lock_and_update_omap_file()
-        return self
-
-    def __exit__(self, typ, value, traceback):
-        context = self.enter_args.get("context")
-        self.enter_args.clear()
-        if context:
-            self.omap_state.unlock_omap()
 
     def _init_cluster_context(self) -> None:
         """Init cluster context management variables"""
@@ -156,7 +133,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.logger.info(f"Received request to create bdev {name} from"
                          f" {request.rbd_pool_name}/{request.rbd_image_name}"
                          f" with block size {request.block_size}")
-        with self(context=context):
+        with LockGuard(self, context is not None):
             try:
                 bdev_name = rpc_bdev.bdev_rbd_create(
                     self.spdk_rpc_client,
@@ -228,7 +205,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
                             use_excep = Exception(msg)
 
         # If we're about to just throw an exception there is no need to lock the OMAP file so just pass None as context
-        with self(context=context if not use_excep else None):
+        with LockGuard(self, context is not None):
             try:
                 if use_excep:
                     raise use_excep
@@ -267,7 +244,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
             randser = random.randint(2, 99999999999999)
             request.serial_number = f"SPDK{randser}"
 
-        with self(context=context):
+        with LockGuard(self, context is not None):
             try:
                 ret = rpc_nvmf.nvmf_create_subsystem(
                     self.spdk_rpc_client,
@@ -305,7 +282,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.logger.info(
             f"Received request to delete subsystem {request.subsystem_nqn}")
 
-        with self(context=context):
+        with LockGuard(self, context is not None):
             try:
                 ret = rpc_nvmf.nvmf_delete_subsystem(
                     self.spdk_rpc_client,
@@ -336,7 +313,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.logger.info(f"Received request to add {request.bdev_name} to"
                          f" {request.subsystem_nqn}")
 
-        with self(context=context):
+        with LockGuard(self, context is not None):
             try:
                 nsid = rpc_nvmf.nvmf_subsystem_add_ns(
                     self.spdk_rpc_client,
@@ -374,7 +351,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.logger.info(f"Received request to remove {request.nsid} from"
                          f" {request.subsystem_nqn}")
 
-        with self(context=context):
+        with LockGuard(self, context is not None):
             try:
                 ret = rpc_nvmf.nvmf_subsystem_remove_ns(
                     self.spdk_rpc_client,
@@ -404,7 +381,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
     def add_host(self, request, context=None):
         """Adds a host to a subsystem."""
 
-        with self(context=context):
+        with LockGuard(self, context is not None):
             try:
                 if request.host_nqn == "*":  # Allow any host access to subsystem
                     self.logger.info(f"Received request to allow any host to"
@@ -449,7 +426,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
     def remove_host(self, request, context=None):
         """Removes a host from a subsystem."""
 
-        with self(context=context):
+        with LockGuard(self, context is not None):
             try:
                 if request.host_nqn == "*":  # Disable allow any host access
                     self.logger.info(
@@ -496,24 +473,22 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.logger.info(f"Received request to create {request.gateway_name}"
                          f" {request.trtype} listener for {request.nqn} at"
                          f" {request.traddr}:{request.trsvcid}.")
-        gateway_name_is_ok = request.gateway_name == self.gateway_name
+        if request.gateway_name != self.gateway_name:
+            raise Exception(f"Gateway name must match current gateway"
+                                    f" ({self.gateway_name})")
 
         # If the gateway name is wrong we will just throw an exception, so there is no point in locking OMAP file
-        with self(context=context if gateway_name_is_ok else None):
+        with LockGuard(self, context is not None):
             try:
-                if gateway_name_is_ok:
-                    ret = rpc_nvmf.nvmf_subsystem_add_listener(
-                        self.spdk_rpc_client,
-                        nqn=request.nqn,
-                        trtype=request.trtype,
-                        traddr=request.traddr,
-                        trsvcid=request.trsvcid,
-                        adrfam=request.adrfam,
-                    )
-                    self.logger.info(f"create_listener: {ret}")
-                else:
-                    raise Exception(f"Gateway name must match current gateway"
-                                    f" ({self.gateway_name})")
+                ret = rpc_nvmf.nvmf_subsystem_add_listener(
+                    self.spdk_rpc_client,
+                    nqn=request.nqn,
+                    trtype=request.trtype,
+                    traddr=request.traddr,
+                    trsvcid=request.trsvcid,
+                    adrfam=request.adrfam,
+                )
+                self.logger.info(f"create_listener: {ret}")
             except Exception as ex:
                 self.logger.error(f"create_listener failed with: \n {ex}")
                 if context:
@@ -544,24 +519,23 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.logger.info(f"Received request to delete {request.gateway_name}"
                          f" {request.trtype} listener for {request.nqn} at"
                          f" {request.traddr}:{request.trsvcid}.")
-        gateway_name_is_ok = request.gateway_name == self.gateway_name
 
         # If the gateway name is wrong we will just throw an exception, so there is no point in locking OMAP file
-        with self(context=context if gateway_name_is_ok else None):
+        if request.gateway_name != self.gateway_name:
+            raise Exception(f"Gateway name must match current gateway"
+                f" ({self.gateway_name})")
+
+        with LockGuard(self, context is not None):
             try:
-                if gateway_name_is_ok:
-                    ret = rpc_nvmf.nvmf_subsystem_remove_listener(
-                        self.spdk_rpc_client,
-                        nqn=request.nqn,
-                        trtype=request.trtype,
-                        traddr=request.traddr,
-                        trsvcid=request.trsvcid,
-                        adrfam=request.adrfam,
-                    )
-                    self.logger.info(f"delete_listener: {ret}")
-                else:
-                    raise Exception(f"Gateway name must match current gateway"
-                                    f" ({self.gateway_name})")
+                ret = rpc_nvmf.nvmf_subsystem_remove_listener(
+                    self.spdk_rpc_client,
+                    nqn=request.nqn,
+                    trtype=request.trtype,
+                    traddr=request.traddr,
+                    trsvcid=request.trsvcid,
+                    adrfam=request.adrfam,
+                )
+                self.logger.info(f"delete_listener: {ret}")
             except Exception as ex:
                 self.logger.error(f"delete_listener failed with: \n {ex}")
                 if context:
@@ -598,3 +572,25 @@ class GatewayService(pb2_grpc.GatewayServicer):
             return pb2.subsystems_info()
 
         return pb2.subsystems_info(subsystems=json.dumps(ret))
+
+#
+# We pass the context from the different functions here. It should point to a real object in case we come from a real
+# resource changing function, resulting from a CLI command. It will be None in case we come from an automatic update
+# which is done because the local state is out of date. In case context is None, that is we're in the middle of an update
+# we should not try to lock the OMAP file as the code will not try to make changes there, only the local spdk calls
+# are done in such a case.
+#
+class LockGuard():
+    def __init__(self, srv: GatewayService, should_lock: bool):
+        self.service = srv
+        self.should_lock = should_lock
+
+
+    def __enter__(self):
+        if self.should_lock:
+            self.service.lock_and_update_omap_file()
+        return self
+
+    def __exit__(self, typ, value, traceback):
+        if self.should_lock:
+            self.service.omap_state.unlock_omap()
