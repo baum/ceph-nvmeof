@@ -169,18 +169,13 @@ class GatewayService(pb2_grpc.GatewayServicer):
         """Deletes a bdev."""
 
         self.logger.info(f"Received request to delete bdev {request.bdev_name}")
-        use_excep = None
 
         if context:
             req_get_subsystems = pb2.get_subsystems_req()
             ret = self.get_subsystems(req_get_subsystems, context)
             subsystems = json.loads(ret.subsystems)
             for subsystem in subsystems:
-                if use_excep is not None:
-                    break
                 for namespace in subsystem['namespaces']:
-                    if use_excep is not None:
-                        break
                     if namespace['bdev_name'] == request.bdev_name:
                         # We found a namespace still using this bdev. If --force was used we will try to remove this namespace.
                         # Otherwise fail with EBUSY
@@ -202,13 +197,11 @@ class GatewayService(pb2_grpc.GatewayServicer):
                                 "Got JSON-RPC error response",
                                 "response:",
                                 json.dumps(ret, indent=2)])
-                            use_excep = Exception(msg)
+                            raise Exception(msg)
 
         # If we're about to just throw an exception there is no need to lock the OMAP file so just pass None as context
         with LockGuard(self, context is not None):
             try:
-                if use_excep:
-                    raise use_excep
                 ret = rpc_bdev.bdev_rbd_delete(
                     self.spdk_rpc_client,
                     request.bdev_name,
