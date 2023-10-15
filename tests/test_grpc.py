@@ -24,26 +24,20 @@ def create_resource_by_index(i):
 @pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
 def test_create_get_subsys(caplog, config):
     with GatewayServer(config) as gateway:
-        time.sleep(1)
         gateway.serve()
 
         for i in range(created_resource_count):
             create_resource_by_index(i)
             assert "Failed" not in caplog.text
 
-        gateway.server.stop(grace=1)
-
-    time.sleep(2)
     caplog.clear()
 
     # restart the gateway here
     with GatewayServer(config) as gateway:
-        time.sleep(1)
         gateway.serve()
 
         for i in range(get_subsys_count):
-            cli(["get_subsystems"])
+            subsystems = cli(["get_subsystems"])
             assert "Exception" not in caplog.text
-            time.sleep(1)
-
-        time.sleep(10)
+            time.sleep(0) # yield to update
+            logger.info(f"number of {len(subsystems)=}")
