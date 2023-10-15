@@ -1,9 +1,11 @@
 import pytest
 import time
+import json
+import logging
 from control.server import GatewayServer
 from control.cli import main as cli
-import logging
-import warnings
+from control.cli import GatewayClient
+from control.proto import gateway_pb2 as pb2
 
 # Set up a logger
 logger = logging.getLogger(__name__)
@@ -13,6 +15,19 @@ bdev_prefix = "Ceph0"
 subsystem_prefix = "nqn.2016-06.io.spdk:cnode"
 created_resource_count = 150
 get_subsys_count = 20
+
+def get_subsystems():
+    client = GatewayClient()
+    parsed_args = client.cli.parser.parse_args(["get_subsystems"])
+    server_address = parsed_args.server_address
+    server_port = parsed_args.server_port
+    client_key = parsed_args.client_key
+    client_cert = parsed_args.client_cert
+    server_cert = parsed_args.server_cert
+    client.connect(server_address, server_port, client_key, client_cert, server_cert)
+    req = pb2.get_subsystems_req()
+    ret = client.stub.get_subsystems(req)
+    return json.loads(ret.subsystems)
 
 def create_resource_by_index(i):
     bdev = f"{bdev_prefix}_{i}"
@@ -37,7 +52,8 @@ def test_create_get_subsys(caplog, config):
         gateway.serve()
 
         for i in range(get_subsys_count):
-            subsystems = cli(["get_subsystems"])
+            subsystems = get_subsystems()
             assert "Exception" not in caplog.text
-            time.sleep(0) # yield to update
+            assert "Failed" not in caplog.text
+            time.sleep(0) # yield to update thread
             logger.info(f"number of {len(subsystems)=}")
