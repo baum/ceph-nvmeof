@@ -14,7 +14,7 @@ pool = "rbd"
 bdev_prefix = "Ceph0"
 subsystem_prefix = "nqn.2016-06.io.spdk:cnode"
 created_resource_count = 150
-get_subsys_count = 20
+get_subsys_count = 1000
 
 def get_subsystems():
     client = GatewayClient()
@@ -50,10 +50,16 @@ def test_create_get_subsys(caplog, config):
     # restart the gateway here
     with GatewayServer(config) as gateway:
         gateway.serve()
+        subsystems = None
 
         for i in range(get_subsys_count):
             subsystems = get_subsystems()
             assert "Exception" not in caplog.text
             assert "Failed" not in caplog.text
             time.sleep(0) # yield to update thread
-            logger.info(f"number of {len(subsystems)=}")
+            nsubsystems = len(subsystems)
+            logger.info(f"number of sysbsystems {nsubsystems=}")
+            if nsubsystems == created_resource_count:
+                break
+            
+        assert(len(subsystems) == created_resource_count)
