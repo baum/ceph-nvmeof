@@ -29,20 +29,32 @@ from google.protobuf import json_format
 from google.protobuf.empty_pb2 import Empty
 from .proto import gateway_pb2 as pb2
 from .proto import gateway_pb2_grpc as pb2_grpc
+from .proto import monitor_pb2
+from .proto import monitor_pb2_grpc
 from .config import GatewayConfig
 from .utils import GatewayEnumUtils
 from .utils import GatewayUtils
 from .utils import GatewayLogger
-from .state import GatewayState
+from .state import GatewayState, GatewayStateHandler, OmapLock
 from .cephutils import CephUtils
 
-MAX_ANA_GROUPS = 4
+MAX_ANA_GROUPS = 16
+# Assuming max of 32 gateways and protocol min 1 max 65519
+CNTLID_RANGE_SIZE = 2040
 
 class BdevStatus:
     def __init__(self, status, error_message, bdev_name = ""):
         self.status = status
         self.error_message = error_message
         self.bdev_name = bdev_name
+
+class MonitorGroupService(monitor_pb2_grpc.MonitorGroupServicer):
+    def __init__(self, set_group_id: Callable[[int], None]) -> None:
+        self.set_group_id = set_group_id
+
+    def group_id(self, request: monitor_pb2.group_id_req, context = None) -> Empty:
+        self.set_group_id(request.id)
+        return Empty()
 
 class GatewayService(pb2_grpc.GatewayServicer):
     """Implements gateway service interface.
@@ -57,7 +69,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
         spdk_rpc_client: Client of SPDK RPC server
     """
 
-    def __init__(self, config, gateway_state, omap_lock, spdk_rpc_client, ceph_utils) -> None:
+    def __init__(self, config: GatewayConfig, gateway_state: GatewayStateHandler, omap_lock: OmapLock, group_id: int, spdk_rpc_client, ceph_utils: CephUtils) -> None:
         """Constructor"""
         self.logger = GatewayLogger(config).logger
         self.ceph_utils = ceph_utils
@@ -137,6 +149,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.rpc_lock = threading.Lock()
         self.gateway_state = gateway_state
         self.omap_lock = omap_lock
+        self.group_id = group_id
         self.spdk_rpc_client = spdk_rpc_client
         self.gateway_name = self.config.get("gateway", "name")
         if not self.gateway_name:
@@ -148,6 +161,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.bdev_cluster = {}
         self.subsystem_nsid_bdev = defaultdict(dict)
         self.subsystem_nsid_anagrp = defaultdict(dict)
+        self.gateway_group = self.config.get("gateway", "group")
         self._init_cluster_context()
 
     def is_valid_host_nqn(nqn):
@@ -182,9 +196,10 @@ class GatewayService(pb2_grpc.GatewayServicer):
         """Init cluster context management variables"""
         self.clusters = {}
         self.current_cluster = None
-        self.bdevs_per_cluster = self.config.getint_with_default("spdk", "bdevs_per_cluster", 8)
+        self.bdevs_per_cluster = self.config.getint_with_default("spdk", "bdevs_per_cluster", 1)
         if self.bdevs_per_cluster < 1:
             raise Exception(f"invalid configuration: spdk.bdevs_per_cluster_contexts {self.bdevs_per_cluster} < 1")
+        self.logger.info(f"NVMeoF bdevs per cluster: {self.bdevs_per_cluster}")
         self.librbd_core_mask = self.config.get_with_default("spdk", "librbd_core_mask", None)
         self.rados_id = self.config.get_with_default("ceph", "id", "")
         if self.rados_id == "":
@@ -209,13 +224,14 @@ class GatewayService(pb2_grpc.GatewayServicer):
     def _alloc_cluster(self) -> str:
         """Allocates a new Rados cluster context"""
         name = f"cluster_context_{len(self.clusters)}"
-        self.logger.info(f"Allocating cluster {name=}")
-        rpc_bdev.bdev_rbd_register_cluster(
+        nonce = rpc_bdev.bdev_rbd_register_cluster(
             self.spdk_rpc_client,
             name = name,
             user = self.rados_id,
             core_mask = self.librbd_core_mask,
         )
+        self.logger.info(f"Allocated cluster {name=} {nonce=}")
+        self.cluster_nonce[name] = nonce
         return name
 
     def _grpc_function_with_lock(self, func, request, context):
@@ -258,15 +274,17 @@ class GatewayService(pb2_grpc.GatewayServicer):
                 return BdevStatus(status=errno.ENODEV, error_message=f"Failure creating bdev {name}: Can't create RBD image {rbd_image_name}")
 
         try:
+            cluster_name=self._get_cluster()
             bdev_name = rpc_bdev.bdev_rbd_create(
                 self.spdk_rpc_client,
                 name=name,
-                cluster_name=self._get_cluster(),
+                cluster_name=cluster_name,
                 pool_name=rbd_pool_name,
                 rbd_name=rbd_image_name,
                 block_size=block_size,
                 uuid=uuid,
             )
+            self.bdev_cluster[name] = cluster_name
             self.logger.info(f"bdev_rbd_create: {bdev_name}")
         except Exception as ex:
             errmsg = f"bdev_rbd_create {name} failed with:\n{ex}"
@@ -403,12 +421,10 @@ class GatewayService(pb2_grpc.GatewayServicer):
             self.logger.error(f"{errmsg}")
             return pb2.req_status(status = errno.EINVAL, error_message = errmsg)
 
-        min_cntlid = self.config.getint_with_default("gateway", "min_controller_id", 1)
-        max_cntlid = self.config.getint_with_default("gateway", "max_controller_id", 65519)
-        if min_cntlid > max_cntlid:
-            errmsg = f"{create_subsystem_error_prefix}: Min controller id {min_cntlid} is bigger than max controller id {max_cntlid}"
-            self.logger.error(f"{errmsg}")
-            return pb2.req_status(status = errno.EINVAL, error_message = errmsg)
+        # Set client ID range according to group id assigned by the monitor
+        offset = self.group_id * CNTLID_RANGE_SIZE
+        min_cntlid = offset + 1
+        max_cntlid = offset + CNTLID_RANGE_SIZE
 
         if not request.serial_number:
             random.seed()
@@ -620,6 +636,8 @@ class GatewayService(pb2_grpc.GatewayServicer):
                 anagrpid=anagrpid,
                 uuid=uuid,
             )
+            self.subsystem_nsid_bdev[subsystem_nqn][nsid] = bdev_name
+            self.subsystem_nsid_anagrp[subsystem_nqn][nsid] = anagrpid
             self.logger.info(f"subsystem_add_ns: {nsid}")
         except Exception as ex:
             errmsg = f"{add_namespace_error_prefix}:\n{ex}"
@@ -652,6 +670,59 @@ class GatewayService(pb2_grpc.GatewayServicer):
         elif uuid:
             ns_id_msg = f"using UUID {uuid} "
         return ns_id_msg
+
+    def set_ana_state(self, request, context=None):
+        return self.execute_grpc_function(self.set_ana_state_safe, request, context)
+
+    def set_ana_state_safe(self, ana_info: pb2.ana_info, context=None):
+        """Sets ana state for this gateway."""
+        self.logger.info(f"Received request to set ana states {ana_info.states}")
+
+        state = self.gateway_state.local.get_state()
+
+        # Iterate over nqn_ana_states in ana_info
+        for nas in ana_info.states:
+            nqn = nas.nqn
+            prefix = f"{self.gateway_state.local.LISTENER_PREFIX}{nqn}_{self.gateway_name}_"
+            listener_keys = [key for key in state.keys() if key.startswith(prefix)]
+            self.logger.info(f"Iterate over {nqn=} {prefix=} {listener_keys=}")
+            # fill the static gateway dictionary per nqn and grp_id
+            for gs in nas.states:
+                self.ana_map[nqn][gs.grp_id]  = gs.state
+
+            for listener_key in listener_keys:
+                listener = json.loads(state[listener_key])
+                self.logger.info(f"{listener_key=} {listener=}")
+
+                # Iterate over ana_group_state in nqn_ana_states
+                for gs in nas.states:
+                    # Access grp_id and state
+                    grp_id = gs.grp_id
+                    # The gateway's interface gRPC ana_state into SPDK JSON RPC values,
+                    # see nvmf_subsystem_listener_set_ana_state method https://spdk.io/doc/jsonrpc.html
+                    ana_state = "optimized" if gs.state == pb2.ana_state.OPTIMIZED else "inaccessible"
+                    try:
+                        self.logger.info(f"set_ana_state nvmf_subsystem_listener_set_ana_state {nqn=} {listener=} {ana_state=} {grp_id=}")
+                        ret = rpc_nvmf.nvmf_subsystem_listener_set_ana_state(
+                            self.spdk_rpc_client,
+                            nqn=nqn,
+                            trtype=listener['trtype'],
+                            traddr=listener['traddr'],
+                            trsvcid=listener['trsvcid'],
+                            adrfam=listener['adrfam'],
+                            ana_state=ana_state,
+                            anagrpid=grp_id)
+                        self.logger.info(f"set_ana_state nvmf_subsystem_listener_set_ana_state response {ret=}")
+                        if not ret:
+                            raise Exception(f"nvmf_subsystem_listener_set_ana_state({nqn=}, {listener=}, {ana_state=}, {grp_id=}) error")
+                    except Exception as ex:
+                        self.logger.exception("nvmf_subsystem_listener_set_ana_state: ")
+                        if context:
+                            context.set_code(grpc.StatusCode.INTERNAL)
+                            context.set_details(f"{ex}")
+                        return pb2.req_status()
+
+        return pb2.req_status(status=True)
 
     def namespace_add_safe(self, request, context):
         """Adds a namespace to a subsystem."""
@@ -1789,16 +1860,23 @@ class GatewayService(pb2_grpc.GatewayServicer):
 
             if enable_ha:
                   for x in range (MAX_ANA_GROUPS):
+                       _ana_state = "inaccessible"
+                       if self.ana_map[request.nqn]:
+                           _ana_state = "optimized" if  self.ana_map[request.nqn][x+1] == pb2.ana_state.OPTIMIZED else "inaccessible"
+                           self.logger.info(f"using ana_map: set listener on nqn : {request.nqn}  ana state : {_ana_state} for group : {x+1}")
                        try:
+                          self.logger.info(f"create_listener nvmf_subsystem_listener_set_ana_state {request=} {_ana_state=} anagrpid={x+1}")
                           ret = rpc_nvmf.nvmf_subsystem_listener_set_ana_state(
                             self.spdk_rpc_client,
                             nqn=request.nqn,
-                            ana_state="inaccessible",
+                            ana_state=_ana_state,
                             trtype="TCP",
                             traddr=request.traddr,
                             trsvcid=str(request.trsvcid),
                             adrfam=adrfam,
                             anagrpid=(x+1) )
+                          self.logger.info(f"create_listener nvmf_subsystem_listener_set_ana_state response {ret=}")
+
                        except Exception as ex:
                             errmsg=f"{create_listener_error_prefix}: Error setting ANA state:\n{ex}"
                             self.logger.error(errmsg)
@@ -1999,6 +2077,45 @@ class GatewayService(pb2_grpc.GatewayServicer):
                 pass
 
         return pb2.subsystems_info_cli(status = 0, error_message = os.strerror(0), subsystems=subsystems)
+
+    def get_subsystems_safe(self, request, context):
+        """Gets subsystems."""
+
+        self.logger.info(f"Received request to get subsystems, context: {context}")
+        subsystems = []
+        try:
+            ret = rpc_nvmf.nvmf_get_subsystems(self.spdk_rpc_client)
+            self.logger.info(f"get_subsystems: {ret}")
+        except Exception as ex:
+            self.logger.error(f"get_subsystems failed with: \n {ex}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"{ex}")
+            return pb2.subsystems_info()
+
+        for s in ret:
+            try:
+                ns_key = "namespaces"
+                if ns_key in s:
+                    for n in s[ns_key]:
+                        nqn = s["nqn"]
+                        nsid = n["nsid"]
+                        n["anagrpid"] = self.subsystem_nsid_anagrp[nqn][nsid]
+                        bdev = self.subsystem_nsid_bdev[nqn][nsid]
+                        nonce = self.cluster_nonce[self.bdev_cluster[bdev]]
+                        n["nonce"] = nonce
+                # Parse the JSON dictionary into the protobuf message
+                subsystem = pb2.subsystem()
+                json_format.Parse(json.dumps(s), subsystem)
+                subsystems.append(subsystem)
+            except Exception:
+                self.logger.exception(f"{s=} parse error: ")
+                raise
+
+        return pb2.subsystems_info(subsystems=subsystems)
+
+    def get_subsystems(self, request, context):
+        with self.rpc_lock:
+            return self.get_subsystems_safe(request, context)
 
     def list_subsystems(self, request, context=None):
         return self.execute_grpc_function(self.list_subsystems_safe, request, context)
