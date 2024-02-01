@@ -656,7 +656,7 @@ class GatewayClient:
         try:
             subsystems = self.stub.list_subsystems(pb2.list_subsystems_req(subsystem_nqn=args.subsystem, serial_number=args.serial_number))
         except Exception as ex:
-            subsystems = pb2.subsystems_info(status = errno.EINVAL, error_message = f"Failure listing subsystems:\n{ex}")
+            subsystems = pb2.subsystems_info_cli(status = errno.EINVAL, error_message = f"Failure listing subsystems:\n{ex}")
 
         if args.format == "text" or args.format == "plain":
             if subsystems.status == 0:

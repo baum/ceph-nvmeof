@@ -17,6 +17,8 @@ import os
 import threading
 import errno
 import contextlib
+from typing import Callable
+from collections import defaultdict
 
 import spdk.rpc.bdev as rpc_bdev
 import spdk.rpc.nvmf as rpc_nvmf
@@ -24,6 +26,7 @@ import spdk.rpc.log as rpc_log
 from spdk.rpc.client import JSONRPCException
 
 from google.protobuf import json_format
+from google.protobuf.empty_pb2 import Empty
 from .proto import gateway_pb2 as pb2
 from .proto import gateway_pb2_grpc as pb2_grpc
 from .config import GatewayConfig
@@ -140,6 +143,11 @@ class GatewayService(pb2_grpc.GatewayServicer):
             self.gateway_name = socket.gethostname()
         self.gateway_group = self.config.get("gateway", "group")
         self.verify_nqns = self.config.getboolean_with_default("gateway", "verify_nqns", True)
+        self.ana_map = defaultdict(dict)
+        self.cluster_nonce = {}
+        self.bdev_cluster = {}
+        self.subsystem_nsid_bdev = defaultdict(dict)
+        self.subsystem_nsid_anagrp = defaultdict(dict)
         self._init_cluster_context()
 
     def is_valid_host_nqn(nqn):
@@ -952,7 +960,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
                         lb_group = n["anagrpid"]
                     except KeyError:
                         pass
-                    one_ns = pb2.namespace(nsid = n["nsid"],
+                    one_ns = pb2.namespace_cli(nsid = n["nsid"],
                                            bdev_name = bdev_name,
                                            uuid = n["uuid"],
                                            load_balancing_group = lb_group)
@@ -1969,7 +1977,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
             if resp:
                 status = resp["code"]
                 errmsg = f"Failure listing subsystems: {resp['message']}"
-            return pb2.subsystems_info(status=status, error_message=errmsg, subsystems=[])
+            return pb2.subsystems_info_cli(status=status, error_message=errmsg, subsystems=[])
 
         for s in ret:
             try:
@@ -1983,14 +1991,14 @@ class GatewayService(pb2_grpc.GatewayServicer):
                     s["namespace_count"] = 0
                     s["enable_ha"] = False
                 # Parse the JSON dictionary into the protobuf message
-                subsystem = pb2.subsystem()
+                subsystem = pb2.subsystem_cli()
                 json_format.Parse(json.dumps(s), subsystem, ignore_unknown_fields=True)
                 subsystems.append(subsystem)
             except Exception:
                 self.logger.exception(f"{s=} parse error: ")
                 pass
 
-        return pb2.subsystems_info(status = 0, error_message = os.strerror(0), subsystems=subsystems)
+        return pb2.subsystems_info_cli(status = 0, error_message = os.strerror(0), subsystems=subsystems)
 
     def list_subsystems(self, request, context=None):
         return self.execute_grpc_function(self.list_subsystems_safe, request, context)
