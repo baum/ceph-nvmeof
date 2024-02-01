@@ -84,6 +84,9 @@ service Gateway {
         // Gets subsystems
         rpc get_subsystems(get_subsystems_req) returns(subsystems_info) {}
 
+	// Set gateway ANA states
+	rpc set_ana_state(ana_info) returns(req_status) {}
+
 	// Gets spdk nvmf log flags and level
 	rpc get_spdk_nvmf_log_flags_and_level(get_spdk_nvmf_log_flags_and_level_req) returns(spdk_nvmf_log_flags_and_level_info) {}
 
@@ -226,6 +229,37 @@ message set_spdk_nvmf_logs_req {
 
 message get_gateway_info_req {
 	optional string cli_version = 1;
+}
+
+// From https://nvmexpress.org/wp-content/uploads/NVM-Express-1_4-2019.06.10-Ratified.pdf page 138
+// Asymmetric Namespace Access state for all namespaces in this ANA
+// Group when accessed through this controller.
+// Value Description Reference
+// 01h ANA Optimized state 8.20.3.1
+// 02h ANA Non-Optimized state 8.20.3.2
+// 03h ANA Inaccessible state 8.20.3.3
+// 04h ANA Persistent Loss state 8.20.3.4
+// 0Fh ANA Change state 8.20.3.5
+// All others Reserved
+enum ana_state {
+  UNSET         = 0;
+  OPTIMIZED     = 1;
+  NON_OPTIMIZED = 2;
+  INACCESSIBLE  = 3;
+}
+
+message ana_group_state {
+	uint32     grp_id = 1;  // groupd id
+	ana_state  state  = 2;  // ANA state
+}
+
+message nqn_ana_states {
+	string     nqn                     = 1; // subsystem nqn
+	repeated   ana_group_state  states = 2; // list of group states
+}
+
+message ana_info {
+	repeated nqn_ana_states states = 1; // list of nqn states
 }
 
 // Return messages 
