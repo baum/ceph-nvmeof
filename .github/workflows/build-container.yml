@@ -502,6 +502,147 @@ jobs:
           make down
           make clean
 
+  ha:
+    needs: [build, build-ceph]
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    env:
+      HUGEPAGES: 768  # 3 spdk instances
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup huge-pages
+        run: make setup HUGEPAGES=$HUGEPAGES
+
+      - name: Download container images
+        uses: actions/download-artifact@v4
+        with:
+          pattern: container_images*
+          merge-multiple: true
+
+      - name: Load container images
+        run: |
+          docker load < nvmeof.tar
+          docker load < nvmeof-cli.tar
+          docker load < ceph.tar
+          docker load < bdevperf.tar
+
+      - name: Start HA with two gateways
+        run: |
+          docker-compose up -d --scale nvmeof=2 nvmeof
+
+      - name: Wait for gateways to be listening
+        timeout-minutes: 3
+        run: |
+          for i in $(seq 2); do
+            while true; do
+              sleep ${{ env.WAIT_INTERVAL_SECS }}  # Adjust the sleep duration as needed
+              GW_NAME=$(docker ps --format '{{.ID}}\t{{.Names}}' | awk '$2 ~ /nvmeof/ && $2 ~ /'$i'/ {print $1}')
+              container_status=$(docker inspect -f '{{.State.Status}}' "$GW_NAME")
+              if [ "$container_status" == "running" ]; then
+                echo "Container $i $GW_NAME is now running."
+              else
+                echo "Container $i $GW_NAME is still not running. Waiting..."
+                continue
+              fi
+              GW_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GW_NAME")"
+              if docker-compose run --rm nvmeof-cli --server-address $GW_IP --server-port 5500 get_subsystems 2>&1 | grep -i failed; then
+                echo "Container $i $GW_NAME $GW_IP no subsystems. Waiting..."
+                continue
+              fi
+              echo "Container $i $GW_NAME $GW_IP subsystems:"
+              docker-compose run --rm nvmeof-cli --server-address $GW_IP --server-port 5500 get_subsystems
+              break;
+            done
+          done
+
+      - name: List containers
+        if: success() || failure()
+        run: |
+          docker-compose ps
+
+      - name: List processes
+        if: success() || failure()
+        run: |
+          docker-compose top
+
+      - name: Set up target
+        run: |
+          GW1_NAME=$(docker ps --format '{{.ID}}\t{{.Names}}' | awk '$2 ~ /nvmeof/ && $2 ~ /1/ {print $1}')
+          GW2_NAME=$(docker ps --format '{{.ID}}\t{{.Names}}' | awk '$2 ~ /nvmeof/ && $2 ~ /2/ {print $1}')
+          GW1_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GW1_NAME")"
+          GW2_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GW2_NAME")"
+          NQN="nqn.2016-06.io.spdk:cnode1"
+          docker-compose  run --rm nvmeof-cli --server-address $GW1_IP --server-port 5500 subsystem add --subsystem  $NQN -a -t
+          docker-compose  run --rm nvmeof-cli --server-address $GW1_IP --server-port 5500 namespace add --subsystem $NQN --rbd-pool rbd --rbd-image demo_image1 --size 10M --rbd-create-image -l 1
+          docker-compose  run --rm nvmeof-cli --server-address $GW1_IP --server-port 5500 namespace add --subsystem $NQN --rbd-pool rbd --rbd-image demo_image2 --size 10M --rbd-create-image -l 2
+          docker-compose  run --rm nvmeof-cli --server-address $GW1_IP --server-port 5500 listener add  --subsystem $NQN --gateway-name $GW1_NAME --traddr $GW1_IP --trsvcid 4420
+          docker-compose  run --rm nvmeof-cli --server-address $GW2_IP --server-port 5500 listener add  --subsystem $NQN --gateway-name $GW2_NAME --traddr $GW2_IP --trsvcid 4420
+          docker-compose  run --rm nvmeof-cli --server-address $GW1_IP --server-port 5500 host add      --subsystem $NQN --host "*"
+          docker-compose  run --rm nvmeof-cli --server-address $GW1_IP --server-port 5500 subsystem list
+          docker-compose  run --rm nvmeof-cli --server-address $GW2_IP --server-port 5500 subsystem list
+
+      - name: Run bdevperf discovery
+        run: |
+          # See
+          # - https://github.com/spdk/spdk/blob/master/doc/jsonrpc.md
+          # - https://spdk.io/doc/nvmf_multipath_howto.html
+          . .env
+          container_ip() {
+            docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1"
+          }
+
+          echo -n "ℹ️  Starting bdevperf container"
+          make up  SVC=bdevperf OPTS="--detach"
+          sleep 10
+          echo "ℹ️  bdevperf start up logs"
+          make logs SVC=bdevperf
+          eval $(make run SVC=bdevperf OPTS="--entrypoint=env" | grep BDEVPERF_SOCKET | tr -d '\n\r' )
+
+
+          ip=$(container_ip $GW1)
+          echo "ℹ️  Using discovery service in gateway $GW1 ip  $ip"
+          rpc="/usr/libexec/spdk/scripts/rpc.py"
+          echo "ℹ️  bdevperf bdev_nvme_set_options"
+          make exec SVC=bdevperf OPTS=-T CMD="$rpc -v -s $BDEVPERF_SOCKET bdev_nvme_set_options -r -1"
+          echo "ℹ️  bdevperf start discovery ip: $ip port: $NVMEOF_DISC_PORT"
+          # -l -1 -o 10
+          make exec SVC=bdevperf OPTS=-T CMD="$rpc -v -s $BDEVPERF_SOCKET bdev_nvme_start_discovery -b Nvme0 -t tcp -a $ip -s $NVMEOF_DISC_PORT -f ipv4 -w"
+          echo "ℹ️  bdevperf bdev_nvme_get_discovery_info"
+          make exec SVC=bdevperf OPTS=-T CMD="$rpc -v -s $BDEVPERF_SOCKET bdev_nvme_get_discovery_info"
+          echo "ℹ️  bdevperf perform_tests"
+          eval $(make run SVC=bdevperf OPTS="--entrypoint=env" | grep BDEVPERF_TEST_DURATION | tr -d '\n\r' )
+          timeout=$(expr $BDEVPERF_TEST_DURATION \* 2)
+          bdevperf="/usr/libexec/spdk/scripts/bdevperf.py"
+          make exec SVC=bdevperf OPTS=-T CMD="$bdevperf -v -t $timeout -s $BDEVPERF_SOCKET perform_tests"
+
+      - name: Check coredump existence
+        if: success() || failure()
+        id: check_coredumps
+        uses: andstor/file-existence-action@20b4d2e596410855db8f9ca21e96fbe18e12930b  # v2, pinned to SHA for security reasons
+        with:
+          files: "/tmp/coredump/core.*"
+
+      - name: Upload ha core dumps
+        if: steps.check_coredumps.outputs.files_exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: core_demo
+          path: /tmp/coredump/core.*
+
+      - name: Display logs
+        if: success() || failure()
+        run: make logs OPTS=''
+
+      - name: Tear down
+        if: success() || failure()
+        run: |
+          make down
+          make clean
+
   push-to-registry:
     if: github.event_name == 'release'
     needs: [pytest, demo, discovery]
