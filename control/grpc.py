@@ -203,7 +203,6 @@ class GatewayService(pb2_grpc.GatewayServicer):
     def _init_cluster_context(self) -> None:
         """Init cluster context management variables"""
         self.clusters = defaultdict(dict)
-        self.current_cluster = {}
         self.bdevs_per_cluster = self.config.getint_with_default("spdk", "bdevs_per_cluster", 8)
         if self.bdevs_per_cluster < 1:
             raise Exception(f"invalid configuration: spdk.bdevs_per_cluster_contexts {self.bdevs_per_cluster} < 1")
@@ -216,18 +215,26 @@ class GatewayService(pb2_grpc.GatewayServicer):
     def _get_cluster(self, anagrp: int) -> str:
         """Returns cluster name, enforcing bdev per cluster context"""
         cluster_name = None
-        if anagrp not in self.current_cluster:
+        for name in self.clusters[anagrp]:
+            if self.clusters[anagrp][name] < self.bdevs_per_cluster:
+                cluster_name = name
+                break
+
+        if not cluster_name:
             cluster_name = self._alloc_cluster(anagrp)
-            self.current_cluster[anagrp] = cluster_name
             self.clusters[anagrp][cluster_name] = 1
-        elif self.current_cluster[anagrp] in self.clusters[anagrp] and self.clusters[anagrp][self.current_cluster[anagrp]] >= self.bdevs_per_cluster:
-            self.current_cluster.pop(anagrp)
-            cluster_name = self._get_cluster(anagrp)
         else:
-            cluster_name = self.current_cluster[anagrp]
             self.clusters[anagrp][cluster_name] += 1
 
         return cluster_name
+
+    def _put_cluster(self, name: str) -> None:
+        for anagrp in self.clusters:
+            if name in self.clusters[anagrp]:
+                self.clusters[anagrp][name] -= 1
+                assert self.clusters[anagrp][name] >= 0
+                return
+        assert False # we should find the cluster in our state
 
     def _alloc_cluster(self, anagrp: int) -> str:
         """Allocates a new Rados cluster context"""
@@ -358,6 +365,7 @@ class GatewayService(pb2_grpc.GatewayServicer):
                 self.spdk_rpc_client,
                 bdev_name,
             )
+            self._put_cluster(self.bdev_cluster[bdev_name])
             self.logger.info(f"delete_bdev {bdev_name}: {ret}")
         except Exception as ex:
             errmsg = f"Failure deleting bdev {bdev_name}:\n{ex}"
