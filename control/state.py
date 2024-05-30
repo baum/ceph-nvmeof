@@ -207,16 +207,11 @@ class OmapLock:
         self.omap_state = omap_state
         self.gateway_state = gateway_state
         self.rpc_lock = rpc_lock
-        self.is_locked = False
         self.omap_file_lock_duration = self.omap_state.config.getint_with_default("gateway", "omap_file_lock_duration", 20)
         self.omap_file_update_reloads = self.omap_state.config.getint_with_default("gateway", "omap_file_update_reloads", 10)
         self.omap_file_lock_retries = self.omap_state.config.getint_with_default("gateway", "omap_file_lock_retries", 30)
         self.omap_file_lock_retry_sleep_interval = self.omap_state.config.getfloat_with_default("gateway",
                                                                                     "omap_file_lock_retry_sleep_interval", 1.0)
-        # This is used for testing purposes only. To allow us testing locking from two gateways at the same time
-        self.omap_file_disable_unlock = self.omap_state.config.getboolean_with_default("gateway", "omap_file_disable_unlock", False)
-        if self.omap_file_disable_unlock:
-            self.logger.warning(f"Will not unlock OMAP file for testing purposes")
 
     #
     # We pass the context from the different functions here. It should point to a real object in case we come from a real
@@ -294,7 +289,6 @@ class OmapLock:
             self.logger.error(f"Unable to lock OMAP file after {self.omap_file_lock_retries} tries. Exiting!")
             raise Exception("Unable to lock OMAP file")
 
-        self.is_locked = True
         omap_version = self.omap_state.get_omap_version()
         local_version = self.omap_state.get_local_version()
 
@@ -306,22 +300,13 @@ class OmapLock:
             raise OSError(errno.EAGAIN, "Unable to lock OMAP file, file not current", self.omap_state.omap_name)
 
     def unlock_omap(self):
-        if self.omap_file_disable_unlock:
-            self.logger.warning(f"OMAP file unlock was disabled, will not unlock file")
-            return
-
         try:
             self.omap_state.ioctx.unlock(self.omap_state.omap_name, self.OMAP_FILE_LOCK_NAME, self.OMAP_FILE_LOCK_COOKIE)
-            self.is_locked = False
         except rados.ObjectNotFound as ex:
             self.logger.warning(f"No such lock, the lock duration might have passed")
-            self.is_locked = False
         except Exception:
             self.logger.exception(f"Unable to unlock OMAP file")
             pass
-
-    def locked(self):
-        return self.is_locked
 
 class OmapGatewayState(GatewayState):
     """Persists gateway NVMeoF target state to an OMAP object.
@@ -628,10 +613,6 @@ class GatewayStateHandler:
 
     def update(self) -> bool:
         """Checks for updated OMAP state and initiates local update."""
-
-        if self.update_is_active_lock.locked():
-            self.logger.warning(f"An update is already running, ignore")
-            return False
 
         with self.update_is_active_lock:
             prefix_list = [
