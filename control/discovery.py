@@ -310,7 +310,7 @@ class DiscoveryService:
         self.version = 1
         self.config = config
         self.lock = threading.Lock()
-        self.omap_state = OmapGatewayState(self.config, "discovery")
+        self.omap_state = OmapGatewayState(self.config, f"discovery-{socket.gethostname()}")
 
         self.gw_logger_object = GatewayLogger(config)
         self.logger = self.gw_logger_object.logger
@@ -1077,7 +1077,7 @@ class DiscoveryService:
 
         local_state = LocalGatewayState()
         gateway_state = GatewayStateHandler(self.config, local_state,
-                                            self.omap_state, self._state_notify_update, "discovery")
+                                            self.omap_state, self._state_notify_update, f"discovery-{socket.gethostname()}")
         gateway_state.start_update()
 
         try:
@@ -1092,6 +1092,9 @@ class DiscoveryService:
             self.conn_vals[key].connection.close()
           self.selector.close()
           self.logger.debug("received a ctrl+C interrupt. exiting...")
+
+        self.omap_state.cleanup_omap()
+        self.omap_state= None
 
 def main(args=None):
     parser = argparse.ArgumentParser(prog="python3 -m control",
