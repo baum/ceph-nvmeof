@@ -11,8 +11,9 @@ docker exec $CEPH_NAME rados listwatchers -p $POOL nvmeof.state | grep "watcher=
 echo "ℹ️  Step 2: stop a gateway"
 
 docker stop $GW1_NAME
-wait
 sleep 5
+make top
+make ps
 
 echo "ℹ️  Step 3: verify 2 watchers"
 

@@ -24,6 +24,10 @@ def sigterm_handler(signum, frame):
         gw_logger.compress_final_log_file(gw_name)
         gw_logger = None
 
+    # Perform any necessary cleanup here
+    # Raise an exception to break out of the main loop
+    raise SystemExit()
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog="python3 -m control",
                                      description="Manage NVMe gateways",
