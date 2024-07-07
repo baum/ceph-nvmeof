@@ -331,6 +331,9 @@ class DiscoveryService:
         self.connection_counter = 1
         self.selector = selectors.DefaultSelector()
 
+    def __enter__(self):
+        return self
+
     def __exit__(self, exc_type, exc_value, traceback):
         """Cleans up Discovery Service resources."""
         if self.omap_state:
