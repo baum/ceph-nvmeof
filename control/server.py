@@ -114,13 +114,13 @@ class GatewayServer:
         gw_logger = self.gw_logger_object
         logger = gw_logger.logger
         signal.signal(signal.SIGCHLD, signal.SIG_IGN)
-        if self.monitor_client_process:
+        if self.monitor_client_process is not None:
             self._stop_monitor_client()
 
-        if self.spdk_process:
+        if self.spdk_process is not None:
             self._stop_spdk()
 
-        if self.server:
+        if self.server is not None:
             if logger:
                 logger.info("Stopping the server...")
             self.server.stop(None)
@@ -269,9 +269,9 @@ class GatewayServer:
         assert self.discovery_pid is None
         self.discovery_pid = os.fork()
         if self.discovery_pid == 0:
-            self.omap_state.remove_omap_cleanup()
-            self.logger.info("Starting ceph nvmeof discovery service")
-            DiscoveryService(self.config).start_service()
+            with DiscoveryService(self.config) as discovery_service:
+                self.logger.info("Starting ceph nvmeof discovery service")
+                discovery_service.start_service()
             os._exit(0)
         else:
             self.logger.info(f"Discovery service process id: {self.discovery_pid}")

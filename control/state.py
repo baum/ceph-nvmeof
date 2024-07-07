@@ -16,7 +16,6 @@ from typing import Dict
 from collections import defaultdict
 from abc import ABC, abstractmethod
 from .utils import GatewayLogger
-import atexit
 
 class GatewayState(ABC):
     """Persists gateway NVMeoF target state.
@@ -379,11 +378,6 @@ class OmapGatewayState(GatewayState):
         except Exception:
             self.logger.exception(f"Unable to create OMAP, exiting!")
             raise
-        atexit.register(self.cleanup_omap)
-        self.logger.debug(f"Registered cleanup_omap() as exit function, id: {self.id_text}")
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.cleanup_omap()
 
     def check_for_old_format_omap_files(self):
         omap_dict = self.get_state()
@@ -534,10 +528,6 @@ class OmapGatewayState(GatewayState):
         else:
             self.logger.info(f"Watch already exists.")
 
-    def remove_omap_cleanup(self):
-        self.logger.debug(f"Removing cleanup_omap() from exit list ({self.id_text})")
-        atexit.unregister(self.cleanup_omap)
-
     def cleanup_omap(self):
         self.logger.info(f"Cleanup OMAP on exit ({self.id_text})")
         if self.watch:
@@ -546,14 +536,14 @@ class OmapGatewayState(GatewayState):
                 self.logger.debug("Unregistered watch")
                 self.watch = None
             except Exception:
-                pass
+                self.logger.exception(f"Unable to close watch:")
         if self.ioctx:
             try:
                 self.ioctx.close()
                 self.logger.debug("Closed Rados connection")
                 self.ioctx = None
             except Exception:
-                pass
+                self.logger.exception(f"Unable to close ioctx:")
 
 class GatewayStateHandler:
     """Maintains consistency in NVMeoF target state store instances.

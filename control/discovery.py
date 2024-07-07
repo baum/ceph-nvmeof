@@ -331,6 +331,12 @@ class DiscoveryService:
         self.connection_counter = 1
         self.selector = selectors.DefaultSelector()
 
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Cleans up Discovery Service resources."""
+        if self.omap_state:
+            self.omap_state.cleanup_omap()
+            self.omap_state= None
+
     def _read_all(self) -> Dict[str, str]:
         """Reads OMAP and returns dict of all keys and values."""
 
@@ -1093,9 +1099,6 @@ class DiscoveryService:
           self.selector.close()
           self.logger.debug("received a ctrl+C interrupt. exiting...")
 
-        self.omap_state.cleanup_omap()
-        self.omap_state= None
-
 def main(args=None):
     parser = argparse.ArgumentParser(prog="python3 -m control",
                                      description="Discover NVMe gateways")
@@ -1109,8 +1112,8 @@ def main(args=None):
     args = parser.parse_args()
 
     config = GatewayConfig(args.config)
-    discovery_service = DiscoveryService(config)
-    discovery_service.start_service()
+    with DiscoveryService(config) as discovery_service:
+        discovery_service.start_service()
 
 if __name__ == "__main__":
     main()
