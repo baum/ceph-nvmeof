@@ -885,6 +885,12 @@ class GatewayService(pb2_grpc.GatewayServicer):
                             context.set_code(grpc.StatusCode.INTERNAL)
                             context.set_details(f"{ex}")
                         return pb2.req_status()
+        for ana_key in inaccessible_ana_groups :
+           ret_recycle = self.namespace_recycle_safe(ana_key)
+           if ret_recycle != 0:
+                errmsg = f"Failure recycle namespaces of ana group {ana_key} "
+                self.logger.error(errmsg)
+                return pb2.req_status(status=ret_recycle , error_message=errmsg)
         return pb2.req_status(status=True)
 
     def choose_anagrpid_for_namespace(self, nsid) ->int:
