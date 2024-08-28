@@ -356,8 +356,6 @@ class GatewayServer:
                 self.logger.exception(f"Error trying to create {sockdir}")
                 raise
         try:
-            # start spdk process
-            time.sleep(2)      # this is a temporary hack, we have a timing issue here. Once we solve it the sleep will ve removed
             self.spdk_process = subprocess.Popen(cmd)
         except Exception:
             self.logger.exception(f"Unable to start SPDK")
@@ -395,9 +393,6 @@ class GatewayServer:
         # Implicitly create transports
         spdk_transports = self.config.get_with_default("spdk", "transports",
                                                        "tcp")
-        for trtype in spdk_transports.split():
-            self._create_transport(trtype.lower())
-
         try:
             return_version = spdk.rpc.spdk_get_version(self.spdk_rpc_client)
             try:
@@ -408,6 +403,9 @@ class GatewayServer:
         except Exception:
             self.logger.exception(f"Can't read SPDK version")
             pass
+
+        for trtype in spdk_transports.split():
+            self._create_transport(trtype.lower())
 
     def _stop_subprocess(self, proc, timeout):
         """Stops SPDK process."""
@@ -471,7 +469,7 @@ class GatewayServer:
         name = "transport_" + trtype + "_options"
         options = self.config.get_with_default("spdk", name, "")
 
-        self.logger.debug(f"create_transport: {trtype} options: {options}")
+        self.logger.info(f"spdk: create_transport: {trtype} options: {options}")
 
         if options:
             try:
@@ -493,22 +491,12 @@ class GatewayServer:
                                                                                       "allowed_consecutive_spdk_ping_failures", 1)
         spdk_ping_interval_in_seconds = self.config.getfloat_with_default("gateway", "spdk_ping_interval_in_seconds", 2.0)
         if spdk_ping_interval_in_seconds < 0.0:
-            self.logger.warning(f"Invalid SPDK ping interval {spdk_ping_interval_in_seconds}, will reset to 0")
-            spdk_ping_interval_in_seconds = 0.0
+            self.logger.warning(f"Invalid SPDK ping interval {spdk_ping_interval_in_seconds}, will reset to 2.0")
+            spdk_ping_interval_in_seconds = 2.0
 
         consecutive_ping_failures = 0
-        # we spend 1 second waiting for server termination so subtract it from ping interval
-        if spdk_ping_interval_in_seconds >= 1.0:
-            spdk_ping_interval_in_seconds -= 1.0
-        else:
-            spdk_ping_interval_in_seconds = 0.0
-
         while True:
-            timedout = self.server.wait_for_termination(timeout=1)
-            if not timedout:
-                break
-            if spdk_ping_interval_in_seconds > 0.0:
-                time.sleep(spdk_ping_interval_in_seconds)
+            time.sleep(spdk_ping_interval_in_seconds)
             alive = self._ping()
             if not alive:
                 consecutive_ping_failures += 1
