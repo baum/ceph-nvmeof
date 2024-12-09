@@ -150,3 +150,9 @@ if not success:
 else:
     print("Key stored successfully")
 ```
+
+## References
+
+- [Configuring the Ceph Object Gateway to use SSE-KMS with Vault ](https://www.ibm.com/docs/en/storage-ceph/6?topic=uhv-configuring-ceph-object-gateway-use-sse-kms-vault)
+- [Key Management System/Rook](https://rook.io/docs/rook/latest/Storage-Configuration/Advanced/key-management-system/) 
+- [Ceph Object Gateway Config Reference](https://docs.ceph.com/en/reef/radosgw/config-ref/)
