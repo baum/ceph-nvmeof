@@ -92,7 +92,7 @@ services:
       nofile: 1024
     networks:
       default:
-        ipv4_address: 192.168.13.2
+        ipv4_address: 10.0.0.2
         ipv6_address: 2001:db8::2
   ceph:
     extends:
@@ -264,5 +264,5 @@ networks:
     enable_ipv6: true
     ipam:
       config:
-        - subnet: 192.168.13.0/24
+        - subnet: 10.0.0.0/8  # This ensures a 255.0.0.0 netmask
         - subnet: 2001:0DB8::/112

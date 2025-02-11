@@ -35,6 +35,9 @@ class ClusterAllocationStrategy(ABC):
         self.rados_id = self.config.get_with_default("ceph", "id", "")
         if self.rados_id == "":
             self.rados_id = None
+        self.gs.logger.info(
+            f"NVMeoF librbd mask: {self.librbd_core_mask}, rados id: {self.rados_id}"
+        )
 
     def _alloc_cluster(self, name: str) -> str:
         """Allocates a new Rados cluster context with SPDK"""
