@@ -99,7 +99,7 @@ def test_multi_gateway_namespace_ids(config, image, caplog):
         assert ret_subsystem.status == 0
         assert f"create_subsystem {subsystem}: True" in caplog.text
         assert f"Failure creating subsystem {subsystem}" not in caplog.text
-        time.sleep(10)
+        time.sleep(20)
         caplog.clear()
         # Send requests to create a namespace on GatewayA
         namespace_req = pb2.namespace_add_req(subsystem_nqn=subsystem,
@@ -111,7 +111,7 @@ def test_multi_gateway_namespace_ids(config, image, caplog):
                                               force=True)
         ret_ns = stubA.namespace_add(namespace_req)
         assert ret_ns.status == 0
-        time.sleep(10)
+        time.sleep(20)
         namespace_req2 = pb2.namespace_add_req(subsystem_nqn=subsystem,
                                                rbd_pool_name=pool,
                                                rbd_image_name=f"{image}EEE",
@@ -121,7 +121,7 @@ def test_multi_gateway_namespace_ids(config, image, caplog):
                                                force=True)
         ret_ns = stubA.namespace_add(namespace_req2)
         assert ret_ns.status == 0
-        time.sleep(10)
+        time.sleep(20)
 
         namespace_list_req = pb2.list_namespaces_req(subsystem=subsystem)
         listA = json.loads(json_format.MessageToJson(

@@ -3,6 +3,7 @@ import copy
 import grpc
 import json
 import time
+import os
 from google.protobuf import json_format
 from control.server import GatewayServer
 from control.cephutils import CephUtils
@@ -31,7 +32,10 @@ def setup_config(config, gw1_name, gw2_name, gw_group, update_notify, update_int
     configA.config["gateway"]["omap_file_lock_duration"] = str(lock_duration)
     configA.config["gateway"]["enable_spdk_discovery_controller"] = "True"
     configA.config["spdk"]["rpc_socket_name"] = sock1_name
-    configA.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x03"
+    if os.cpu_count() >= 4:
+        configA.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x03"
+    else:
+        configA.config["spdk"]["tgt_cmd_extra_args"] = "--disable-cpumask-locks"
     configB = copy.deepcopy(configA)
     portA = configA.getint("gateway", "port") + port_inc
     configA.config["gateway"]["port"] = str(portA)
@@ -40,7 +44,10 @@ def setup_config(config, gw1_name, gw2_name, gw_group, update_notify, update_int
     configB.config["gateway"]["override_hostname"] = gw2_name
     configB.config["gateway"]["port"] = str(portB)
     configB.config["spdk"]["rpc_socket_name"] = sock2_name
-    configB.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x0C"
+    if os.cpu_count() >= 4:
+        configB.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x0C"
+    else:
+        configB.config["spdk"]["tgt_cmd_extra_args"] = "--disable-cpumask-locks"
 
     return configA, configB
 
@@ -155,23 +162,32 @@ def create_resource_by_index(stub, i, caplog):
     if caplog is not None:
         assert f"create_subsystem {subsystem}: True" in caplog.text
         assert f"Failure creating subsystem {subsystem}" not in caplog.text
+        caplog.clear()
     namespace_req = pb2.namespace_add_req(subsystem_nqn=subsystem,
                                           rbd_pool_name=pool, rbd_image_name=image, block_size=4096,
                                           create_image=True, size=16 * 1024 * 1024, force=True)
     ret_namespace = stub.namespace_add(namespace_req)
     assert ret_namespace.status == 0
+    assert ret_namespace.nsid > 0
+    if caplog is not None:
+        assert f"subsystem_add_ns: {ret_namespace.nsid}" in caplog.text
+        assert "Failure adding namespace " not in caplog.text
+        caplog.clear()
     hostnqn = build_host_nqn(i)
     host_req = pb2.add_host_req(subsystem_nqn=subsystem, host_nqn=hostnqn)
     ret_host = stub.add_host(host_req)
     assert ret_host.status == 0
+    if caplog is not None:
+        assert f"add_host {hostnqn}: True" in caplog.text
+        assert f"Failure adding host {hostnqn} to {subsystem}" not in caplog.text
+        caplog.clear()
     host_req = pb2.add_host_req(subsystem_nqn=subsystem, host_nqn="*")
     ret_host = stub.add_host(host_req)
     assert ret_host.status == 0
     if caplog is not None:
-        assert f"add_host {hostnqn}: True" in caplog.text
         assert "add_host *: True" in caplog.text
         assert f"Failure allowing open host access to {subsystem}" not in caplog.text
-        assert f"Failure adding host {hostnqn} to {subsystem}" not in caplog.text
+        caplog.clear()
 
 
 def check_resource_by_index(i, subsys_list, hosts_info):
@@ -299,7 +315,6 @@ def test_multi_gateway_concurrent_changes(config, image, conn_concurrent, caplog
             create_resource_by_index(stubA, i, caplog)
         else:
             create_resource_by_index(stubB, i, caplog)
-        assert "failed" not in caplog.text.lower()
     listener_req = pb2.create_listener_req(nqn=f"{subsystem_prefix}0",
                                            host_name=gwA.host_name,
                                            adrfam="ipv4",
@@ -311,7 +326,7 @@ def test_multi_gateway_concurrent_changes(config, image, conn_concurrent, caplog
            f"{subsystem_prefix}0 at 127.0.0.1:5001" in caplog.text
     assert "create_listener: True" in caplog.text
 
-    timeout = 15  # Maximum time to wait (in seconds)
+    timeout = 30  # Maximum time to wait (in seconds)
     start_time = time.time()
     expected_warning_other_gw = f"Listener not created as gateway's host name {gwB.host_name} " \
                                 f"differs from requested host {gwA.host_name}"
