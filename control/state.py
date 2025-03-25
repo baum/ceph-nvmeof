@@ -388,26 +388,9 @@ class OmapLock:
     # we should not try to lock the OMAP file as the code will not try to make changes there,
     # only the local spdk calls are done in such a case.
     #
-    def __enter__(self):
-        if self.omap_file_lock_duration > 0:
-            self.lock_omap()
-            self.lock_start_time = time.monotonic()
-        return self
-
-    def __exit__(self, typ, value, traceback):
-        if self.omap_file_lock_duration > 0:
-            duration = 0.0
-            if self.lock_start_time:
-                duration = time.monotonic() - self.lock_start_time
-            self.lock_start_time = 0.0
-            self.unlock_omap()
-            if duration > self.omap_file_lock_duration:
-                self.logger.error(f"Operation ran for {duration:.2f} seconds, but the OMAP "
-                                  f"lock expired after {self.omap_file_lock_duration} seconds")
-
     def get_omap_lock_to_use(self, context):
         if context:
-            return self
+            return OmapWriteGuard(self)
         return contextlib.suppress()
 
     #
@@ -670,6 +653,33 @@ class OmapLock:
             OmapLock.is_exclusively_locked = False
             OmapLock.locked_by = {}
             OmapLock.lock_cookie = []
+
+
+class OmapWriteGuard:
+    def __init__(self, omap_lock):
+        self.omap_lock = omap_lock
+        self.omap_file_lock_duration = omap_lock.omap_file_lock_duration
+        self.logger = omap_lock.logger
+        self.lock_start_time = 0.0
+
+    def __enter__(self):
+        if self.omap_file_lock_duration > 0:
+            self.omap_lock.lock_omap()
+            self.lock_start_time = time.monotonic()
+        return self
+
+    def __exit__(self, typ, value, traceback):
+        if self.omap_file_lock_duration > 0:
+            duration = 0.0
+            if self.lock_start_time:
+                duration = time.monotonic() - self.lock_start_time
+            self.lock_start_time = 0.0
+            self.omap_lock.unlock_omap()
+            if duration > self.omap_file_lock_duration:
+                self.logger.error(
+                    f"Operation ran for {duration:.2f} seconds, but the OMAP "
+                    f"lock expired after {self.omap_file_lock_duration} seconds"
+                )
 
 
 class OmapReadGuard:
