@@ -588,14 +588,16 @@ class OmapLock:
                               f"id: {self.omap_state.id_text}, cookie: "
                               f"{lock_cookie}")
             self.logger.warning(f"No such lock, the {lock_kind} lock might have expired")
+            raise
         except AttributeError as ex:
             # We got here beause ioctx was closed before trying to unlock
             self.logger.debug(f"Got exception trying to {lock_kind} unlock:\n{ex}")
             self.logger.error(f"Unable to {lock_kind} unlock OMAP file")
             OmapLock.reset_lock_markers()
+            raise
         except Exception:
             self.logger.exception(f"Unable to {lock_kind} unlock OMAP file")
-            pass
+            raise
 
         try:
             with OmapLock.changes_lock:

@@ -6,6 +6,7 @@ from control.proto import gateway_pb2_grpc as pb2_grpc
 import copy
 import time
 import os
+import rados
 
 pool = "rbd"
 host_prefix = "nqn.2014-08.org.nvmexpress:uuid:893a6752-fe9b-ca48-aa93-e4565f3288"
@@ -94,7 +95,8 @@ def test_mixing_locks(caplog, two_gateways):
     assert "The OMAP file is locked, will try again in" in caplog.text
     assert "Succeeded to lock OMAP file (shared) after" in caplog.text
     caplog.clear()
-    gwA.omap_lock.unlock_omap()
+    with pytest.raises(rados.ObjectNotFound):
+        gwA.omap_lock.unlock_omap()
     assert "No such lock, the exclusive lock might have expired" in caplog.text
     caplog.clear()
     gwA.omap_lock.lock_omap(False, False, 1)
@@ -109,15 +111,11 @@ def test_mixing_locks(caplog, two_gateways):
     caplog.clear()
     gwB.omap_lock.unlock_omap(False, 2)
     assert "OMAP was unlocked" in caplog.text
-    gotValueError = False
     caplog.clear()
-    try:
+    with pytest.raises(rados.ObjectNotFound):
         gwA.omap_lock.unlock_omap(False, 1)
-    except ValueError:
-        gotValueError = True
     assert "OMAP was unlocked" not in caplog.text
     assert "No such lock, the shared lock might have expired" in caplog.text
-    assert gotValueError
     caplog.clear()
     gwA.omap_lock.lock_omap()
     assert "Locked OMAP exclusive" in caplog.text
@@ -130,14 +128,10 @@ def test_mixing_locks(caplog, two_gateways):
     caplog.clear()
     gwA.omap_lock.unlock_omap()
     assert "OMAP was unlocked" in caplog.text
-    gotValueError = False
     caplog.clear()
-    try:
+    with pytest.raises(rados.ObjectNotFound):
         gwA.omap_lock.unlock_omap()
-    except ValueError:
-        gotValueError = True
     assert "No such lock, the exclusive lock might have expired" in caplog.text
-    assert gotValueError
     caplog.clear()
     gwA.omap_lock.lock_omap()
     assert "Locked OMAP exclusive" in caplog.text
