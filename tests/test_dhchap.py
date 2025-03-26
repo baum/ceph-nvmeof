@@ -5,6 +5,7 @@ from control.cli import main_test as cli_test
 from control.cephutils import CephUtils
 import grpc
 import time
+import os
 
 image = "mytestdevimage"
 pool = "rbd"
@@ -79,7 +80,10 @@ def gateway(config):
     config.config["gateway"]["override_hostname"] = "GW1"
     config.config["gateway-logs"]["log_level"] = "debug"
     config.config["gateway"]["group"] = ""
-    config.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x01"
+    if os.cpu_count() >= 4:
+        config.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x01"
+    else:
+        config.config["spdk"]["tgt_cmd_extra_args"] = "--disable-cpumask-locks"
     ceph_utils = CephUtils(config)
 
     with GatewayServer(config) as gateway:
@@ -116,7 +120,10 @@ def gateway_encryption_disabled(config):
     config.config["gateway-logs"]["log_level"] = "debug"
     config.config["gateway"]["group"] = ""
     config.config["gateway"]["enable_key_encryption"] = "False"
-    config.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x02"
+    if os.cpu_count() >= 4:
+        config.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x02"
+    else:
+        config.config["spdk"]["tgt_cmd_extra_args"] = "--disable-cpumask-locks"
     ceph_utils = CephUtils(config)
 
     with GatewayServer(config) as gateway_encryption_disabled:
@@ -153,7 +160,10 @@ def gateway_no_encryption_key(config):
     config.config["gateway"]["group"] = ""
     config.config["gateway"]["enable_key_encryption"] = "True"
     config.config["gateway"]["encryption_key"] = "/etc/ceph/NOencryption.key"
-    config.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x04"
+    if os.cpu_count() >= 4:
+        config.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x04"
+    else:
+        config.config["spdk"]["tgt_cmd_extra_args"] = "--disable-cpumask-locks"
     ceph_utils = CephUtils(config)
 
     with GatewayServer(config) as gateway_no_encryption_key:
@@ -190,7 +200,10 @@ def gateway_no_key_encryption_disabled(config):
     config.config["gateway"]["group"] = ""
     config.config["gateway"]["enable_key_encryption"] = "False"
     config.config["gateway"]["encryption_key"] = "/etc/ceph/NOencryption.key"
-    config.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x08"
+    if os.cpu_count() >= 4:
+        config.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x08"
+    else:
+        config.config["spdk"]["tgt_cmd_extra_args"] = "--disable-cpumask-locks"
     ceph_utils = CephUtils(config)
 
     with GatewayServer(config) as gateway_no_key_encryption_disabled:

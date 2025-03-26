@@ -244,7 +244,6 @@ class GatewayServer:
         omap_state = OmapGatewayState(self.config, f"gateway-{self.name}")
         self.omap_state = omap_state
         local_state = LocalGatewayState()
-        omap_state.check_for_old_format_omap_files()
 
         # install SIGCHLD handler
         signal.signal(signal.SIGCHLD, sigchld_handler)
@@ -267,7 +266,7 @@ class GatewayServer:
         gateway_state = GatewayStateHandler(self.config, local_state, omap_state,
                                             self.gateway_rpc_caller, self.crypto,
                                             f"gateway-{self.name}")
-        self.omap_lock = OmapLock(omap_state, gateway_state, self.rpc_lock)
+        self.omap_lock = OmapLock(gateway_state, self.rpc_lock)
         self.gateway_rpc = GatewayService(self.config, gateway_state, self.rpc_lock,
                                           self.omap_lock, self.group_id, self.spdk_rpc_client,
                                           self.spdk_rpc_subsystems_client, self.ceph_utils)

@@ -10,7 +10,7 @@
 import argparse
 import json
 from .config import GatewayConfig
-from .state import GatewayState, LocalGatewayState, OmapGatewayState, GatewayStateHandler
+from .state import GatewayState, LocalGatewayState, OmapLock, OmapGatewayState, GatewayStateHandler
 from .utils import GatewayLogger
 from .utils import GatewayUtilsCrypto
 
@@ -1158,6 +1158,7 @@ class DiscoveryService:
                                             self.omap_state,
                                             self._state_notify_update,
                                             dummy_crypto, f"discovery-{socket.gethostname()}")
+        OmapLock(gateway_state, None)
         gateway_state.start_update()
 
         try:

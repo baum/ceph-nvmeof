@@ -6,6 +6,7 @@ import grpc
 from control.proto import gateway_pb2_grpc as pb2_grpc
 import copy
 import time
+import os
 
 image = "mytestdevimage"
 pool = "rbd"
@@ -38,7 +39,10 @@ def two_gateways(config):
     configA.config["gateway"]["name"] = nameA
     configA.config["gateway"]["override_hostname"] = nameA
     configA.config["spdk"]["rpc_socket_name"] = sockA
-    configA.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x03"
+    if os.cpu_count() >= 4:
+        configA.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x03"
+    else:
+        configA.config["spdk"]["tgt_cmd_extra_args"] = "--disable-cpumask-locks"
     portA = configA.getint("gateway", "port")
     configB.config["gateway"]["name"] = nameB
     configB.config["gateway"]["override_hostname"] = nameB
@@ -47,7 +51,10 @@ def two_gateways(config):
     discPortB = configB.getint("discovery", "port") + 1
     configB.config["gateway"]["port"] = str(portB)
     configB.config["discovery"]["port"] = str(discPortB)
-    configB.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x0C"
+    if os.cpu_count() >= 4:
+        configB.config["spdk"]["tgt_cmd_extra_args"] = "-m 0x0C"
+    else:
+        configB.config["spdk"]["tgt_cmd_extra_args"] = "--disable-cpumask-locks"
 
     ceph_utils = CephUtils(config)
     with (GatewayServer(configA) as gatewayA, GatewayServer(configB) as gatewayB):
@@ -85,6 +92,11 @@ def test_change_host_key(caplog, two_gateways):
     assert f"Adding host {hostnqn2} to {subsystem}: Successful" in caplog.text
     assert f"Host {hostnqn2} has a DH-HMAC-CHAP key but subsystem {subsystem} has none, " \
            f"a unidirectional authentication will be used" in caplog.text
+    time.sleep(15)
+    assert f"Received request to add host {hostnqn2} to " \
+           f"{subsystem}, context: <grpc._server" in caplog.text
+    assert f"Received request to add host {hostnqn2} to " \
+           f"{subsystem}, context: None" in caplog.text
     caplog.clear()
     cli(["host", "change_key", "--subsystem", subsystem,
          "--host-nqn", hostnqn1, "--dhchap-key", key2])

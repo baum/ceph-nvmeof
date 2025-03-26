@@ -105,7 +105,7 @@ def test_multi_gateway_coordination(config, image, conn):
 
     # Watch/Notify
     if update_notify:
-        time.sleep(1)
+        time.sleep(15)
         listB = json.loads(json_format.MessageToJson(
             stubB.list_subsystems(list_subsystems_req),
             preserving_proto_field_name=True, including_default_value_fields=True))['subsystems']
@@ -124,7 +124,7 @@ def test_multi_gateway_coordination(config, image, conn):
         assert nsListB[0]["rbd_pool_name"] == pool
 
     # Periodic update
-    time.sleep(update_interval_sec + 1)
+    time.sleep(update_interval_sec + 15)
     listB = json.loads(json_format.MessageToJson(
         stubB.list_subsystems(list_subsystems_req),
         preserving_proto_field_name=True, including_default_value_fields=True))['subsystems']
