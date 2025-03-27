@@ -99,21 +99,21 @@ def test_mixing_locks(caplog, two_gateways):
         gwA.omap_lock.unlock_omap()
     assert "No such lock, the exclusive lock might have expired" in caplog.text
     caplog.clear()
-    gwA.omap_lock.lock_omap(False, False, 1)
+    gwA.omap_lock.lock_omap(False, False, '1')
     assert "Locked OMAP shared" in caplog.text
     caplog.clear()
-    gwB.omap_lock.lock_omap(False, False, 2)
+    gwB.omap_lock.lock_omap(False, False, '2')
     assert "Locked OMAP shared" in caplog.text
     assert "We already locked the OMAP file" not in caplog.text
     caplog.clear()
-    gwA.omap_lock.unlock_omap(False, 1)
+    gwA.omap_lock.unlock_omap(False, '1')
     assert "OMAP was unlocked" in caplog.text
     caplog.clear()
-    gwB.omap_lock.unlock_omap(False, 2)
+    gwB.omap_lock.unlock_omap(False, '2')
     assert "OMAP was unlocked" in caplog.text
     caplog.clear()
     with pytest.raises(rados.ObjectNotFound):
-        gwA.omap_lock.unlock_omap(False, 1)
+        gwA.omap_lock.unlock_omap(False, '1')
     assert "OMAP was unlocked" not in caplog.text
     assert "No such lock, the shared lock might have expired" in caplog.text
     caplog.clear()
@@ -135,15 +135,11 @@ def test_mixing_locks(caplog, two_gateways):
     caplog.clear()
     gwA.omap_lock.lock_omap()
     assert "Locked OMAP exclusive" in caplog.text
-    gotFileExists = False
     caplog.clear()
-    try:
-        gwA.omap_lock.lock_omap(False, False, 3)
-    except FileExistsError:
-        gotFileExists = True
+    with pytest.raises(FileExistsError):
+        gwA.omap_lock.lock_omap(False, False, '3')
     assert "No need to lock OMAP for read as we already have it locked for write" in caplog.text
     assert "Locked OMAP shared" not in caplog.text
-    assert gotFileExists
     gwA.omap_lock.unlock_omap()
     gwA.rpc_lock.release()
     gwB.rpc_lock.release()

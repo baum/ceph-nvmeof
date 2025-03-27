@@ -420,7 +420,7 @@ class OmapLock:
             raise RuntimeError(f"Unable to lock OMAP file after reloading "
                                f"{self.omap_file_update_reloads} times, exiting")
 
-    def lock_omap(self, verify_versions=True, lock_exclusive=True, cookie_suffix=None):
+    def lock_omap(self, verify_versions=True, lock_exclusive=True, lock_cookie=None):
         got_lock = False
         if lock_exclusive:
             assert self.rpc_lock and self.rpc_lock.locked(), \
@@ -439,7 +439,9 @@ class OmapLock:
         else:
             lock_kind = OmapLock.SHARED_LOCK_NAME
 
-        lock_cookie = self.build_omap_lock_cookie(lock_exclusive, cookie_suffix)
+        if not lock_cookie:
+            lock_cookie = self.build_omap_lock_cookie(lock_exclusive)
+
         for i in range(0, self.omap_file_lock_retries + 1):
             try:
                 if lock_exclusive:
@@ -559,7 +561,7 @@ class OmapLock:
                               "Unable to lock OMAP file, file not current",
                               self.omap_state.omap_name)
 
-    def unlock_omap(self, unlock_exclusive=True, cookie_suffix=None):
+    def unlock_omap(self, unlock_exclusive=True, lock_cookie=None):
         if self.omap_file_disable_unlock:
             self.logger.warning("OMAP file unlock was disabled, will not unlock file")
             return
@@ -573,7 +575,8 @@ class OmapLock:
         else:
             lock_kind = OmapLock.SHARED_LOCK_NAME
 
-        lock_cookie = self.build_omap_lock_cookie(unlock_exclusive, cookie_suffix)
+        if not lock_cookie:
+            lock_cookie = self.build_omap_lock_cookie(unlock_exclusive)
         try:
             self.omap_state.ioctx.unlock(self.omap_state.omap_name,
                                          self.OMAP_FILE_LOCK_NAME,
@@ -618,26 +621,9 @@ class OmapLock:
             cookies = OmapLock.lock_cookie.copy()
         for lock_cookie in cookies:
             try:
-                self.omap_state.ioctx.unlock(self.omap_state.omap_name,
-                                             self.OMAP_FILE_LOCK_NAME,
-                                             lock_cookie)
-                self.logger.debug(f"OMAP was unlocked, thread id: "
-                                  f"{threading.get_native_id()}, "
-                                  f"id: {self.omap_state.id_text}, cookie: "
-                                  f"{lock_cookie}")
-            except rados.ObjectNotFound:
-                self.logger.debug(f"OMAP lock not found, thread id: "
-                                  f"{threading.get_native_id()}, "
-                                  f"id: {self.omap_state.id_text}, cookie: "
-                                  f"{lock_cookie}")
-                self.logger.warning("No such lock, the lock might have expired")
-            except AttributeError:
-                # We got here beause ioctx was closed before trying to unlock
-                pass
+                self.unlock_omap(True, lock_cookie)
             except Exception:
-                self.logger.exception("Unable to unlock OMAP file")
-                pass
-
+                self.logger.exception(f"error on {lock_cookie}")
         OmapLock.reset_lock_markers()
 
     def write_locked_by_me(self) -> bool:
@@ -665,8 +651,9 @@ class OmapReadGuard:
 
     def __enter__(self):
         try:
-            self.cookie_suffix = time.time_ns()
-            self.omap_lock.lock_omap(False, False, self.cookie_suffix)
+            cookie_suffix = time.time_ns()
+            self.lock_cookie = self.omap_lock.build_omap_lock_cookie(False, cookie_suffix)
+            self.omap_lock.lock_omap(False, False, self.lock_cookie)
             self.actually_locked = True
             return self
         except FileExistsError:
@@ -679,8 +666,8 @@ class OmapReadGuard:
 
     def __exit__(self, typ, value, traceback):
         if self.actually_locked:
-            self.omap_lock.unlock_omap(False, self.cookie_suffix)
-        self.cookie_suffix = None
+            self.omap_lock.unlock_omap(False, self.lock_cookie)
+        self.lock_cookie = None
         self.actually_locked = False
 
 
@@ -958,10 +945,7 @@ class OmapGatewayState(GatewayState):
             except Exception:
                 pass
         if omap_lock and omap_lock.omap_file_lock_duration > 0:
-            try:
-                omap_lock.unlock_all_omap()
-            except Exception:
-                pass
+            omap_lock.unlock_all_omap()
         if self.ioctx:
             try:
                 self.ioctx.close()
