@@ -361,6 +361,8 @@ class OmapLock:
                 duration = time.monotonic() - self.lock_start_time
             self.lock_start_time = 0.0
             self.unlock_omap()
+            self.logger.error("emulate omap unlock error")
+            assert False, "omap onlock error, will restart"
             if duration > self.omap_file_lock_duration:
                 self.logger.error(f"Operation ran for {duration:.2f} seconds, but the OMAP "
                                   f"lock expired after {self.omap_file_lock_duration} seconds")
