@@ -1152,6 +1152,10 @@ class GatewayService(pb2_grpc.GatewayServicer):
             f"{request.enable_ha}, max_namespaces: {request.max_namespaces}, no group "
             f"append: {request.no_group_append}, context: {context}{peer_msg}")
 
+        self.logger.error("XXXXX about to assert")
+        assert False, "XXXX aborting gateway"
+        self.logger.error("XXX stil here")
+
         if not request.enable_ha:
             errmsg = f"{create_subsystem_error_prefix}: HA must be enabled for subsystems"
             self.logger.error(errmsg)
