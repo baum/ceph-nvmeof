@@ -125,7 +125,6 @@ class GatewayServer:
         self.crypto = None
         self.gateway_state = None
         self.exiting = False
-        self.is_gateway_process = True
         enc_key = None
         enc_key_file = self.config.get_with_default("gateway", "encryption_key", "")
         if enc_key_file:
@@ -161,14 +160,6 @@ class GatewayServer:
         if gw_logger:
             logger = gw_logger.logger
 
-        # In case we got here because the discovery exited, do nothing
-        if not self.is_gateway_process:
-            process_name = "discovery"
-            if logger:
-                logger.info(f"Exiting the {process_name} process.")
-            return
-        else:
-            process_name = "gateway"
         if self.gateway_rpc:
             self.gateway_rpc.up_and_running = False
         if self.gateway_state:
@@ -232,7 +223,7 @@ class GatewayServer:
             self.omap_state = None
 
         if logger:
-            logger.info(f"Exiting the {process_name} process.")
+            logger.info("Exiting the gateway process.")
 
         if gw_logger and gw_name:
             gw_logger.compress_final_log_file(gw_name)
@@ -434,26 +425,8 @@ class GatewayServer:
         self.discovery_pid = os.fork()
         if self.discovery_pid == 0:
             self.logger.info("Starting ceph nvmeof discovery service")
-            # Reset server related fields for the discovery process
-            self.is_gateway_process = False
-            self.spdk_process = None
-            self.monitor_client_process = None
-            self.spdk_log_file = None
-            self.spdk_log_file_path = None
-            self.monitor_client_log_file = None
-            self.monitor_client_log_file_path = None
-            self.omap_state = None
-            self.name = None
             signal.signal(signal.SIGCHLD, signal.SIG_DFL)
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            if self.server:
-                self.server.stop(None)
-                self.server = None
-            if self.gateway_rpc:
-                self.gateway_rpc.up_and_running = False
-                self.gateway_rpc = None
-            self.gateway_state = None
-            self.omap_lock = None
             with DiscoveryService(self.config) as discovery:
                 discovery.start_service()
             os._exit(0)
