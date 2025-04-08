@@ -445,6 +445,7 @@ class GatewayServer:
             self.omap_state = None
             self.name = None
             signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
             if self.server:
                 self.server.stop(None)
                 self.server = None
