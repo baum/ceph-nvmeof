@@ -144,6 +144,23 @@ class TestServer(unittest.TestCase):
                 gatewayB.serve()
         self.validate_exception(cm.exception)
 
+    def test_monc_connect_timeout(self):
+        """
+        Tests monitor client exits due to connect timeout (no set_group_id, no signal, just wait).
+        """
+        config_monc_timeout = copy.deepcopy(self.config)
+
+        # Do not call set_group_id, do not send any signal
+        with self.assertRaises(SystemExit) as cm:
+            with GatewayServer(config_monc_timeout) as gateway:
+                gateway.serve()
+                # Wait for longer than the monitor timeout
+                time.sleep(120)
+                # The monitor client should have exited and gateway should abort
+                gateway.keep_alive()
+        self.validate_exception(cm.exception)
+        self.remove_core_files(self.core_dir)
+
 
 if __name__ == '__main__':
     unittest.main()
