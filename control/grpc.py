@@ -67,16 +67,14 @@ class SubsystemsCache:
 
     def __init__(self, spdk_rpc_client=None, gateway_service=None, logger=None):
         self.cache_lock = threading.Lock()
-        self.subsystems = []  # Cached subsystems list, never None
+        # Initial empty cached subsystems list object, never None
+        self.subsystems = pb2.subsystems_info()
         self.logger = logger
         self.spdk_rpc_client = spdk_rpc_client  # For making RPC calls
         self.gateway_service = gateway_service  # For data enrichment
 
     def get(self):
-        """Get cached subsystems. Always returns cached data (no RPC call).
-
-        Returns list of subsystems (may be empty on startup before first refresh).
-
+        """Get cached protobuf subsystems_info object. Always returns cached data (no RPC call).
         """
         with self.cache_lock:
             return self.subsystems
@@ -84,7 +82,7 @@ class SubsystemsCache:
     def refresh(self):
         """Refresh cache by calling SPDK RPC.
 
-        Called by ping loop in main thread every 2 seconds.
+        Called by ping loop in the main thread every 2 seconds.
         Returns True if successful, False if SPDK call failed.
         """
         try:
@@ -105,41 +103,47 @@ class SubsystemsCache:
             return False
 
     def _update_cache(self, subsystems):
-        """Internal method to update cache data with enrichment.
+        """Internal method to update cache data with nonces and protobuf conversion.
 
-        Private method - only called by refresh().
-        Enriches subsystems data with DH-CHAP keys, nonces, and namespace info.
+        Private method - only called by refresh() and __init__().
+        Enriches subsystems data with nonces.
+        Converts enriched data to protobuf objects for fast retrieval.
         """
-        if not subsystems:
-            # Empty list - keep old data
-            self.logger.warning("SPDK returned empty subsystems list, keeping existing cache")
+        # Enrich data before storing in cache
+        if not self.gateway_service:
+            self.logger.error("No gateway service available")
             return
 
-        # Enrich data before storing in cache
-        if self.gateway_service:
-            for s in subsystems:
-                try:
-                    # Add DH-CHAP key status
-                    k = self.gateway_service.host_info.does_subsystem_have_dhchap_key(s["nqn"])
-                    s["has_dhchap_key"] = k
+        # Enrich subsystems with nonces (if gateway service available)
+        for s in subsystems:
+            try:
+                # Enrich namespace information
+                ns_key = "namespaces"
+                if ns_key in s and self.gateway_service:
+                    for n in s[ns_key]:
+                        bdev = n["bdev_name"]
+                        # Add cluster nonce
+                        with self.gateway_service.shared_state_lock:
+                            c = self.gateway_service.bdev_cluster[bdev]
+                            nonce = self.gateway_service.cluster_nonce[c]
+                        n["nonce"] = nonce
+            except Exception:
+                self.logger.exception("Error enriching subsystems")
 
-                    # Enrich namespace information
-                    ns_key = "namespaces"
-                    if ns_key in s:
-                        for n in s[ns_key]:
-                            bdev = n["bdev_name"]
-                            # Add cluster nonce
-                            with self.gateway_service.shared_state_lock:
-                                c = self.gateway_service.bdev_cluster[bdev]
-                                nonce = self.gateway_service.cluster_nonce[c]
-                            n["nonce"] = nonce
-                except Exception:
-                    self.logger.exception(f"Error enriching subsystem {s.get('nqn', 'unknown')}")
+        # Convert enriched data to protobuf objects
+        protobuf_subsystems = []
+        for s in subsystems:
+            subsystem = pb2.subsystem()
+            json_format.Parse(json.dumps(s), subsystem)
+            protobuf_subsystems.append(subsystem)
 
-        # Update cache with enriched data
+        # Create complete subsystems_info object
+        subsystems_info = pb2.subsystems_info(subsystems=protobuf_subsystems)
+
+        # Update cache with complete protobuf object
         with self.cache_lock:
-            self.subsystems = subsystems
-            self.logger.debug(f"Cache refreshed with {len(subsystems)} subsystems")
+            self.subsystems = subsystems_info
+        self.logger.debug(f"Cache refreshed with {len(protobuf_subsystems)} subsystems")
 
 
 class BdevStatus:
@@ -751,7 +755,6 @@ class GatewayService(pb2_grpc.GatewayServicer):
         gateway_state: Methods for target state persistence
         spdk_rpc_client: Client of SPDK RPC server
         spdk_rpc_subsystems_client: Client of SPDK RPC server for get_subsystems
-        spdk_rpc_subsystems_lock: Mutex to hold while using get subsystems SPDK client
         shared_state_lock: guard mutex for bdev_cluster and cluster_nonce
         subsystem_nsid_bdev_and_uuid: map of nsid to bdev
         cluster_nonce: cluster context nonce map
@@ -792,7 +795,6 @@ class GatewayService(pb2_grpc.GatewayServicer):
         self.group_id = group_id
         self.spdk_rpc_client = spdk_rpc_client
         self.spdk_rpc_subsystems_client = spdk_rpc_subsystems_client
-        self.spdk_rpc_subsystems_lock = threading.Lock()
         self.shared_state_lock = threading.Lock()
         self.gateway_name = self.config.get("gateway", "name")
         if not self.gateway_name:
@@ -5661,30 +5663,21 @@ class GatewayService(pb2_grpc.GatewayServicer):
         return pb2.subsystems_info_cli(status=0, error_message=os.strerror(0),
                                        subsystems=subsystems)
 
-    def get_subsystems_safe(self, request, context):
+    def get_subsystems(self, request, context):
         """Gets subsystems.
 
-        Returns pre-enriched cached data. Cache is refreshed by ping loop every 2s.
-        Data is already enriched during refresh, so this just converts to protobuf.
+        Returns subsystems_info object from cache.
+        Cache is refreshed by ping loop in the main thread
+        every 2s with complete protobuf object creation.
+
+        Threading: Only cache_lock is needed, which is held by the cache when returning the value.
+        No other locks are required since this is a pure cache read operation.
         """
-        peer_msg = self.get_peer_message(context)
-        self.logger.debug(f"Received request to get subsystems, context: {context}{peer_msg}")
+        self.logger.debug(f"Received request to get subsystems, context: {context}")
 
-        # Read pre-enriched data from cache
-        ret = self.subsystems_cache.get()
-
-        # Convert to protobuf
-        subsystems = []
-        for s in ret:
-            subsystem = pb2.subsystem()
-            json_format.Parse(json.dumps(s), subsystem, ignore_unknown_fields=True)
-            subsystems.append(subsystem)
-
-        return pb2.subsystems_info(subsystems=subsystems)
-
-    def get_subsystems(self, request, context):
-        with self.spdk_rpc_subsystems_lock:
-            return self.get_subsystems_safe(request, context)
+        subsystems_info = self.subsystems_cache.get()
+        self.logger.debug(f"Returning {len(subsystems_info.subsystems)} subsystems from cache")
+        return subsystems_info
 
     def list_subsystems(self, request, context=None):
         return self.execute_grpc_function(self.list_subsystems_safe, request, context)
