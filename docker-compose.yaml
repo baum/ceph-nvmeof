@@ -85,7 +85,7 @@ services:
         ceph osd pool stats rbd
       start_period: 6s
       interval: 3s
-      retries: 10
+      retries: 32
     volumes:
       - ceph-conf:/etc/ceph
     ulimits:
