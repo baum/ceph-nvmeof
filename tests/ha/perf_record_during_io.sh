@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # perf_record_during_io.sh - Record perf data during bdevperf I/O for CI
 # Usage: ./perf_record_during_io.sh VARIANT [DURATION]
@@ -22,14 +22,15 @@ mkdir -p "$RESULTS_DIR"
 
 echo "ℹ️  Perf recording: variant=$VARIANT duration=${PERF_DURATION}s, results=$RESULTS_DIR"
 
-# Copy config for reference
+# Copy config for reference. Export so docker compose (when run directly) uses it.
 NVMEOF_CONFIG="${NVMEOF_CONFIG:-./ceph-nvmeof.conf}"
+export NVMEOF_CONFIG
 if [ -f "$NVMEOF_CONFIG" ]; then
     cp "$NVMEOF_CONFIG" "$RESULTS_DIR/gateway_config.conf"
 fi
 
-# Get nvmeof container (gateway 1)
-CONTAINER_ID=$(docker ps --format '{{.ID}}\t{{.Names}}' | awk '$2 ~ /nvmeof/ && $2 ~ /1/ {print $1}' | head -1)
+# Get nvmeof container (gateway 1, exclude discovery)
+CONTAINER_ID=$(docker ps --format '{{.ID}}\t{{.Names}}' | grep -v discovery | awk '$2 ~ /nvmeof/ && $2 ~ /1/ {print $1}' | head -1)
 if [ -z "$CONTAINER_ID" ]; then
     echo "❌ No nvmeof container found"
     exit 1
@@ -54,8 +55,8 @@ perf_pid=$!
 # Wait for perf to start
 sleep 3
 
-# Run bdevperf (1 second) - same flow as sanity.sh but with 1s duration
-GW1_NAME=$(docker ps --format '{{.ID}}\t{{.Names}}' | awk '$2 ~ /nvmeof/ && $2 ~ /1/ {print $1}')
+# Run bdevperf (1 second). Use docker compose directly (not make) so NVMEOF_CONFIG export is used.
+GW1_NAME=$(docker ps --format '{{.ID}}\t{{.Names}}' | grep -v discovery | awk '$2 ~ /nvmeof/ && $2 ~ /1/ {print $1}')
 ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GW1_NAME")
 
 echo "ℹ️  Starting bdevperf container (1s test duration for perf recording)"
@@ -63,19 +64,19 @@ export BDEVPERF_TEST_DURATION=1
 docker compose up -d bdevperf
 sleep 5
 
-eval $(make run SVC=bdevperf OPTS="--entrypoint=env" | grep BDEVPERF_SOCKET | tr -d '\n\r')
 rpc="/usr/libexec/spdk/scripts/rpc.py"
 NVMEOF_DISC_PORT=8009
+eval $(docker compose run --rm --entrypoint=env bdevperf | grep BDEVPERF_SOCKET | tr -d '\n\r')
 
-make exec SVC=bdevperf OPTS=-T CMD="$rpc -v -s $BDEVPERF_SOCKET bdev_nvme_set_options -r -1"
-make exec SVC=bdevperf OPTS=-T CMD="$rpc -v -s $BDEVPERF_SOCKET bdev_nvme_start_discovery -b Nvme0 -t tcp -a $ip -s $NVMEOF_DISC_PORT -f ipv4 -w"
-make exec SVC=bdevperf OPTS=-T CMD="$rpc -v -s $BDEVPERF_SOCKET bdev_nvme_get_discovery_info"
+docker compose exec -T bdevperf "$rpc" -v -s "$BDEVPERF_SOCKET" bdev_nvme_set_options -r -1
+docker compose exec -T bdevperf "$rpc" -v -s "$BDEVPERF_SOCKET" bdev_nvme_start_discovery -b Nvme0 -t tcp -a "$ip" -s "$NVMEOF_DISC_PORT" -f ipv4 -w
+docker compose exec -T bdevperf "$rpc" -v -s "$BDEVPERF_SOCKET" bdev_nvme_get_discovery_info
 
 # Run perform_tests (duration=1s set via BDEVPERF_TEST_DURATION at container start)
 bdevperf="/usr/libexec/spdk/scripts/bdevperf.py"
-eval $(make run SVC=bdevperf OPTS="--entrypoint=env" | grep BDEVPERF_TEST_DURATION | tr -d '\n\r')
+eval $(docker compose run --rm --entrypoint=env bdevperf | grep BDEVPERF_TEST_DURATION | tr -d '\n\r')
 timeout=$(expr ${BDEVPERF_TEST_DURATION:-1} \* 2)
-make exec SVC=bdevperf OPTS=-T CMD="$bdevperf -v -t $timeout -s $BDEVPERF_SOCKET perform_tests"
+docker compose exec -T bdevperf "$bdevperf" -v -t "$timeout" -s "$BDEVPERF_SOCKET" perform_tests
 
 # Wait for perf to finish
 wait $perf_pid 2>/dev/null || true

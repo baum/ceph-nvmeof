@@ -1,7 +1,7 @@
 set -xe
 
-# Single gateway setup for perf_default test
-GW1_NAME=$(docker ps --format '{{.ID}}\t{{.Names}}' | awk '$2 ~ /nvmeof/ && $2 ~ /1/ {print $1}')
+# Single gateway setup for perf_default test (exclude discovery)
+GW1_NAME=$(docker ps --format '{{.ID}}\t{{.Names}}' | grep -v discovery | awk '$2 ~ /nvmeof/ && $2 ~ /1/ {print $1}' | head -1)
 GW1_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GW1_NAME")"
 NQN="nqn.2016-06.io.spdk:cnode1"
 

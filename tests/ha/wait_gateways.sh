@@ -13,12 +13,21 @@ if [ $# -ge 1 ]; then
         exit 1
     fi
 fi
+# Match nvmeof gateway containers only (exclude discovery, which also matches nvmeof/1)
 for i in $(seq $SCALE); do
+  retries=0
   while true; do
     GW_NAME=''
+    waited=0
     while [ ! -n "$GW_NAME" ]; do
-      sleep 1  # Adjust the sleep duration as needed
-      GW_NAME=$(docker ps --format '{{.ID}}\t{{.Names}}' | awk '$2 ~ /nvmeof/ && $2 ~ /'$i'/ {print $1}')
+      sleep 1
+      GW_NAME=$(docker ps --format '{{.ID}}\t{{.Names}}' | grep -v discovery | awk -v i=$i '$2 ~ /nvmeof/ && $2 ~ i {print $1}')
+      waited=$((waited + 1))
+      if [ $waited -ge 60 ]; then
+        echo "Timeout: gateway $i not found after 60s. docker ps:"
+        docker ps -a --format 'table {{.Names}}\t{{.Status}}' | grep -E 'nvmeof|ceph' || true
+        exit 1
+      fi
     done
     container_status=$(docker inspect -f '{{.State.Status}}' "$GW_NAME")
     if [ "$container_status" = "running" ]; then
@@ -30,6 +39,12 @@ for i in $(seq $SCALE); do
     GW_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GW_NAME")"
     if ! docker compose run --rm nvmeof-cli $CLI_TLS_ARGS --server-address $GW_IP --server-port 5500 get_subsystems; then
       echo "Container $i $GW_NAME $GW_IP no subsystems. Waiting..."
+      retries=$((retries + 1))
+      if [ $retries -ge 30 ]; then
+        echo "Timeout: get_subsystems failed 30 times. Gateway may have failed to start. Logs:"
+        docker logs "$GW_NAME" 2>&1 | tail -50
+        exit 1
+      fi
       continue
     fi
     break;
